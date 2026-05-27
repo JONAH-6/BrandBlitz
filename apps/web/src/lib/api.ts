@@ -1,7 +1,26 @@
 import axios from "axios";
 import type { AxiosInstance } from "axios";
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost/api";
+let BASE_URL = process.env.NEXT_PUBLIC_API_URL;
+
+if (!BASE_URL) {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("NEXT_PUBLIC_API_URL is required in production");
+  }
+  BASE_URL = "http://localhost:3001/api";
+}
+
+try {
+  const parsedUrl = new URL(BASE_URL);
+  if (!parsedUrl.pathname.endsWith("/api")) {
+    throw new Error("NEXT_PUBLIC_API_URL must end with /api");
+  }
+} catch (error) {
+  if (error instanceof TypeError) {
+    throw new Error("NEXT_PUBLIC_API_URL must be a valid URL");
+  }
+  throw error;
+}
 
 export function createApiClient(token?: string): AxiosInstance {
   return axios.create({
