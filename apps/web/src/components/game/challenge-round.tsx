@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import { CountdownTimer } from "./countdown-timer";
 import { cn } from "@/lib/utils";
@@ -10,7 +11,7 @@ import type { ChallengeQuestion } from "@/lib/api";
 interface ChallengeRoundProps {
   question: ChallengeQuestion;
   round: 1 | 2 | 3;
-  onAnswer: (option: "A" | "B" | "C" | "D", reactionTimeMs: number) => void;
+  onAnswer: (option: "A" | "B" | "C" | "D" | null, reactionTimeMs: number) => void;
   brandLogoUrl?: string;
   brandProductImageUrl?: string;
 }
@@ -34,19 +35,49 @@ export function ChallengeRound({
     setAnswered(false);
   }, [round]);
 
-  const handleSelect = (option: "A" | "B" | "C" | "D") => {
+  const handleSelect = useCallback((option: "A" | "B" | "C" | "D") => {
     if (answered) return;
     const reactionTimeMs = Date.now() - startTimeRef.current;
     setSelected(option);
     setAnswered(true);
     onAnswer(option, reactionTimeMs);
-  };
+  }, [answered, onAnswer]);
+
+  useEffect(() => {
+    if (answered) return;
+
+    const keyToOption: Record<string, "A" | "B" | "C" | "D" | undefined> = {
+      a: "A",
+      b: "B",
+      c: "C",
+      d: "D",
+      1: "A",
+      2: "B",
+      3: "C",
+      4: "D",
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || target?.isContentEditable) return;
+
+      const opt = keyToOption[event.key.toLowerCase()];
+      if (!opt) return;
+
+      event.preventDefault();
+      handleSelect(opt);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [answered, handleSelect]);
 
   const handleTimeExpire = () => {
     if (!answered) {
-      // Submit null answer — server records 0 score
       const reactionTimeMs = ROUND_SECONDS * 1000;
-      onAnswer("A", reactionTimeMs); // forced answer on expire
+      setAnswered(true);
+      onAnswer(null, reactionTimeMs);
     }
   };
 
@@ -72,21 +103,25 @@ export function ChallengeRound({
       {/* Prompt image */}
       {(question.prompt_type === "logo" && brandLogoUrl) && (
         <div className="flex justify-center py-4">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
+          <Image
             src={brandLogoUrl}
             alt="Brand prompt"
-            className="h-24 object-contain"
+            width={320}
+            height={96}
+            sizes="320px"
+            className="h-24 w-auto object-contain"
           />
         </div>
       )}
       {(question.prompt_type === "productImage1" && brandProductImageUrl) && (
         <div className="flex justify-center py-4">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
+          <Image
             src={brandProductImageUrl}
             alt="Product prompt"
-            className="h-40 object-contain rounded-lg"
+            width={480}
+            height={320}
+            sizes="480px"
+            className="h-40 w-auto rounded-lg object-contain"
           />
         </div>
       )}
@@ -107,8 +142,11 @@ export function ChallengeRound({
               answered && "pointer-events-none"
             )}
             onClick={() => handleSelect(opt)}
+            aria-label={`${opt}: ${getOptionLabel(opt)}`}
           >
-            <span className="font-bold mr-3 text-[var(--muted-foreground)]">{opt}</span>
+            <kbd className="font-bold mr-3 text-[var(--muted-foreground)] inline-flex items-center justify-center min-w-6 h-6 px-1 rounded border border-[var(--border)] bg-[var(--muted)]">
+              {opt}
+            </kbd>
             <span>{getOptionLabel(opt)}</span>
           </Button>
         ))}

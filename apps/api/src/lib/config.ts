@@ -9,6 +9,11 @@ const configSchema = z.object({
 
   // Auth
   JWT_SECRET: z.string().min(32),
+  /** Set during rotation: the secret being phased out. Both old + new are accepted
+   *  simultaneously for the duration of the access-token TTL (15 min). */
+  JWT_SECRET_PREVIOUS: z.string().min(32).optional(),
+  /** Separate signing secret for refresh tokens. Falls back to JWT_SECRET. */
+  JWT_REFRESH_SECRET: z.string().min(32).optional(),
   GOOGLE_CLIENT_ID: z.string().min(1),
   GOOGLE_CLIENT_SECRET: z.string().min(1),
   WEB_URL: z.string().url().default("http://localhost:3000"),
@@ -36,6 +41,12 @@ const configSchema = z.object({
 
   // Logging
   LOG_LEVEL: z.enum(["error", "warn", "info", "http", "verbose", "debug", "silly"]).default("info"),
+
+  // Error monitoring — absent by default in local dev; set in staging/prod
+  SENTRY_DSN: z.string().url().optional(),
+
+  // Session integrity — rotated independently of JWT_SECRET; optional for backwards compat
+  SESSION_INTEGRITY_KEY: z.string().min(32).optional(),
 });
 
 export type Config = z.infer<typeof configSchema>;

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -6,37 +7,43 @@ import { api } from "@/lib/api";
 import { formatUsdc } from "@/lib/utils";
 import type { Challenge } from "@/lib/api";
 
-async function getActiveChallenges(): Promise<Challenge[]> {
+async function getActiveChallenges(): Promise<{ challenges: Challenge[]; failed: boolean }> {
   try {
     const res = await api.get("/challenges?limit=6");
-    return res.data.challenges;
+    return {
+      challenges: res.data.challenges,
+      failed: false,
+    };
   } catch {
-    return [];
+    return {
+      challenges: [],
+      failed: true,
+    };
   }
 }
 
 export default async function HomePage() {
-  const challenges = await getActiveChallenges();
+  const { challenges, failed } = await getActiveChallenges();
 
   return (
-    <main className="flex flex-col min-h-screen">
+    <main className="flex min-h-screen flex-col">
       {/* Hero */}
-      <section className="flex flex-col items-center justify-center text-center px-6 py-24 bg-gradient-to-b from-[var(--primary)] to-[var(--background)]">
+      <section className="flex flex-col items-center justify-center bg-gradient-to-b from-[var(--primary)] to-[var(--background)] px-6 py-24 text-center">
         <Badge variant="secondary" className="mb-4">
           Powered by Stellar USDC
         </Badge>
-        <h1 className="text-5xl md:text-7xl font-extrabold text-white mb-6 leading-tight">
+        <h1 className="mb-6 text-5xl font-extrabold leading-tight text-white md:text-7xl">
           Brand Challenges.
           <br />
           Real USDC Rewards.
         </h1>
-        <p className="text-lg md:text-xl text-white/80 max-w-xl mb-10">
+        <p className="mb-10 max-w-xl text-lg text-white/80 md:text-xl">
           Study a brand for 30 seconds. Answer 3 questions. Top performers earn USDC instantly on
           Stellar.
         </p>
-        <div className="flex gap-4 flex-wrap justify-center">
+        <div className="flex flex-wrap justify-center gap-4">
           <Link href="/challenge">
-            <Button size="lg" variant="secondary" className="text-lg px-8">
+            <Button size="lg" variant="secondary" className="px-8 text-lg">
               Play Now
             </Button>
           </Link>
@@ -44,7 +51,7 @@ export default async function HomePage() {
             <Button
               size="lg"
               variant="outline"
-              className="text-lg px-8 text-white border-white hover:bg-white/10"
+              className="border-white px-8 text-lg text-white hover:bg-white/10"
             >
               Sign In
             </Button>
@@ -53,22 +60,32 @@ export default async function HomePage() {
       </section>
 
       {/* Active Challenges */}
-      <section className="px-6 py-16 max-w-5xl mx-auto w-full">
-        <h2 className="text-3xl font-bold mb-8">Active Challenges</h2>
+      <section className="mx-auto w-full max-w-5xl px-6 py-16">
+        <h2 className="mb-8 text-3xl font-bold">Active Challenges</h2>
 
-        {challenges.length === 0 ? (
+        {failed ? (
+          <p className="text-[var(--muted-foreground)]">
+            Couldn&apos;t load active challenges right now. Refresh and try again.
+          </p>
+        ) : challenges.length === 0 ? (
           <p className="text-[var(--muted-foreground)]">
             No active challenges yet. Check back soon!
           </p>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
             {challenges.map((c) => (
-              <Card key={c.id} className="hover:shadow-lg transition-shadow">
+              <Card key={c.id} className="transition-shadow hover:shadow-lg">
                 <CardHeader>
                   <div className="flex items-center justify-between">
                     {c.logo_url ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={c.logo_url} alt={c.brand_name} className="h-12 object-contain" />
+                      <Image
+                        src={c.logo_url}
+                        alt={c.brand_name ?? "Brand logo"}
+                        width={160}
+                        height={48}
+                        sizes="160px"
+                        className="h-12 w-auto object-contain"
+                      />
                     ) : (
                       <div
                         className="h-12 w-12 rounded-lg"
@@ -77,7 +94,7 @@ export default async function HomePage() {
                     )}
                     <Badge variant="default">Active</Badge>
                   </div>
-                  <CardTitle>{c.brand_name}</CardTitle>
+                  <CardTitle>{c.brand_name ?? "Untitled brand"}</CardTitle>
                   <CardDescription>
                     Prize pool: {formatUsdc(c.pool_amount_usdc)} USDC
                   </CardDescription>
@@ -99,10 +116,10 @@ export default async function HomePage() {
       </section>
 
       {/* How It Works */}
-      <section className="px-6 py-16 bg-[var(--muted)]">
-        <div className="max-w-4xl mx-auto">
-          <h2 className="text-3xl font-bold text-center mb-12">How It Works</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8 text-center">
+      <section className="bg-[var(--muted)] px-6 py-16">
+        <div className="mx-auto max-w-4xl">
+          <h2 className="mb-12 text-center text-3xl font-bold">How It Works</h2>
+          <div className="grid grid-cols-1 gap-8 text-center md:grid-cols-3">
             {[
               {
                 step: "1",
@@ -121,7 +138,7 @@ export default async function HomePage() {
               },
             ].map(({ step, title, desc }) => (
               <div key={step} className="space-y-3">
-                <div className="h-14 w-14 rounded-full bg-[var(--primary)] text-white text-xl font-bold flex items-center justify-center mx-auto">
+                <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[var(--primary)] text-xl font-bold text-white">
                   {step}
                 </div>
                 <h3 className="text-xl font-semibold">{title}</h3>

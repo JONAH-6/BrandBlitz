@@ -1,66 +1,75 @@
 import { Router } from "express";
-import jwt from "jsonwebtoken";
 import { z } from "zod";
-import { findUserByGoogleId, upsertUser } from "../db/queries/users";
+import { findUserById, upsertUser } from "../db/queries/users";
 import { createError } from "../middleware/error";
 import { authLimiter } from "../middleware/rate-limit";
 import { authenticate } from "../middleware/authenticate";
-import { config } from "../lib/config";
+import { verifyGoogleIdToken } from "../services/google-auth";
+import {
+  signAccessToken, signRefreshToken, verifyRefreshToken,
+  markJtiUsed, registerRefreshJti, revokeAllUserRefreshTokens, isJtiRevoked,
+} from "../lib/tokens";
 
 const router = Router();
 
-const GoogleCallbackSchema = z.object({
-  googleId: z.string(),
-  email: z.string().email(),
-  name: z.string().optional(),
-  avatarUrl: z.string().url().optional(),
-});
+const GoogleCallbackSchema = z.object({ idToken: z.string().min(1) });
+const RefreshTokenSchema = z.object({ refreshToken: z.string().min(1) });
 
-/**
- * POST /auth/google/callback
- * Called by Next.js after successful Google OAuth.
- * Issues a JWT for the API.
- */
+function serializeUser(user: { id: string; email: string; display_name?: string | null; username?: string | null; avatar_url?: string | null; role?: string | null }) {
+  return { id: user.id, email: user.email, displayName: user.display_name ?? null, username: user.username ?? null, avatarUrl: user.avatar_url ?? null, role: (user as any).role ?? "player" };
+}
+
+/** POST /auth/google/callback */
 router.post("/google/callback", authLimiter, async (req, res) => {
-  const body = GoogleCallbackSchema.parse(req.body);
-
-  const user = await upsertUser({
-    email: body.email,
-    googleId: body.googleId,
-    name: body.name,
-    avatarUrl: body.avatarUrl,
-  });
-
-  const token = jwt.sign(
-    { sub: user.id, email: user.email },
-    config.JWT_SECRET,
-    { expiresIn: "7d" }
-  );
-
-  res.json({ token, user: { id: user.id, email: user.email, avatarUrl: user.avatar_url } });
+  const { idToken } = GoogleCallbackSchema.parse(req.body);
+  const profile = await verifyGoogleIdToken(idToken);
+  const user = await upsertUser({ email: profile.email, googleId: profile.googleId, name: profile.name, avatarUrl: profile.avatarUrl });
+  const accessToken = signAccessToken(user);
+  const refreshToken = signRefreshToken(user);
+  const payload = verifyRefreshToken(refreshToken);
+  await registerRefreshJti(user.id, payload.jti);
+  res.json({ token: accessToken, refreshToken, user: serializeUser(user) });
 });
 
-/**
- * GET /auth/me
- * Returns the authenticated user's profile.
- */
+/** GET /auth/me */
 router.get("/me", authenticate, async (req, res) => {
-  const user = await findUserByGoogleId(req.user!.sub);
+  const user = await findUserById(req.user!.sub);
   if (!user) throw createError("User not found", 404);
-  res.json({ user });
+  res.json({ user: serializeUser(user) });
 });
 
-/**
- * POST /auth/refresh
- * Re-issues a JWT for an authenticated user.
- */
-router.post("/refresh", authenticate, (req, res) => {
-  const token = jwt.sign(
-    { sub: req.user!.sub, email: req.user!.email },
-    config.JWT_SECRET,
-    { expiresIn: "7d" }
-  );
-  res.json({ token });
+/** POST /auth/refresh — rotates tokens, detects reuse */
+router.post("/refresh", async (req, res) => {
+  const { refreshToken } = RefreshTokenSchema.parse(req.body);
+  let payload: ReturnType<typeof verifyRefreshToken>;
+  try { payload = verifyRefreshToken(refreshToken); }
+  catch { throw createError("Invalid refresh token", 401, "INVALID_REFRESH_TOKEN"); }
+
+  const alreadyUsed = await markJtiUsed(payload.jti);
+  if (alreadyUsed) {
+    await revokeAllUserRefreshTokens(payload.sub);
+    throw createError("Refresh token reuse detected — all sessions revoked", 401, "TOKEN_REUSE");
+  }
+  if (await isJtiRevoked(payload.jti)) throw createError("Refresh token revoked", 401, "TOKEN_REVOKED");
+
+  const user = await findUserById(payload.sub);
+  if (!user) throw createError("Invalid refresh token", 401, "INVALID_REFRESH_TOKEN");
+
+  const newAccess = signAccessToken(user);
+  const newRefresh = signRefreshToken(user);
+  const newPayload = verifyRefreshToken(newRefresh);
+  await registerRefreshJti(user.id, newPayload.jti);
+  res.json({ token: newAccess, refreshToken: newRefresh });
+});
+
+/** POST /auth/logout — invalidates current refresh token */
+router.post("/logout", async (req, res) => {
+  const body = RefreshTokenSchema.safeParse(req.body);
+  if (body.success) {
+    try { const p = verifyRefreshToken(body.data.refreshToken); await markJtiUsed(p.jti); }
+    catch { /* already invalid */ }
+  }
+  res.json({ ok: true });
 });
 
 export default router;

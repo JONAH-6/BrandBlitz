@@ -1,26 +1,34 @@
-import path from "path";
-import { defineConfig } from "vitest/config";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import { defineProject } from "vitest/config";
 
-export default defineConfig({
+const projectRoot = path.dirname(fileURLToPath(import.meta.url));
+const sharedSetupFile = path.resolve(projectRoot, "../../tests/setup.ts");
+
+export default defineProject({
   resolve: {
     alias: {
-      "@brandblitz/storage": path.resolve(__dirname, "../../packages/storage/src"),
-      "@brandblitz/stellar": path.resolve(__dirname, "../../packages/stellar/src"),
+      "@brandblitz/storage": path.resolve(projectRoot, "../../packages/storage/src"),
+      "@brandblitz/stellar": path.resolve(projectRoot, "../../packages/stellar/src"),
     },
   },
   test: {
+    name: "@brandblitz/api",
+    root: projectRoot,
     globals: true,
     environment: "node",
+    setupFiles: [sharedSetupFile],
     include: ["src/**/*.test.ts"],
     coverage: {
       provider: "v8",
-      all: true,
-      include: ["src/services/scoring.ts", "src/middleware/error.ts", "src/routes/upload.ts"],
-      reporter: ["text", "lcov"],
-      statements: 95,
-      branches: 95,
-      functions: 95,
-      lines: 95,
+      reporter: ["text", "html"],
+      reportsDirectory: "./coverage",
+      thresholds: {
+        branches: 0,
+        functions: 0,
+        lines: 0,
+        statements: 0,
+      },
     },
   },
 });

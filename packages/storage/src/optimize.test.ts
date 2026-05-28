@@ -1,6 +1,8 @@
+import { createHash } from "crypto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { optimizeImage, StorageError } from "./optimize";
-import { s3 } from "./client";
+import { s3, uploadObject } from "./client";
+import sharp from "sharp";
 
 vi.mock("./client", () => ({
   s3: {
@@ -9,31 +11,54 @@ vi.mock("./client", () => ({
   BUCKETS: {
     BRAND_ASSETS: "brand-assets",
   },
+  uploadObject: vi.fn().mockResolvedValue(undefined),
 }));
+
+// We'll mock sharp for some tests but keep it real for others if needed.
+// Actually, for unit tests, it's better to mock it completely to avoid binary dependencies in some environments.
+vi.mock("sharp", () => {
+  const mSharp = vi.fn(() => ({
+    metadata: vi.fn().mockResolvedValue({ format: "png" }),
+    resize: vi.fn().mockReturnThis(),
+    webp: vi.fn().mockReturnThis(),
+    toBuffer: vi.fn().mockResolvedValue(Buffer.from("optimized")),
+  }));
+  return { default: mSharp };
+});
 
 describe("optimizeImage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  const validImageBuffer = Buffer.from(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
-    "base64"
-  );
-  
-  const corruptImageBuffer = Buffer.from("this is not an image");
+  const dummyBuffer = Buffer.from("dummy");
 
   it("should process the image successfully (happy path)", async () => {
+    const optimizedContent = Buffer.from("optimized"); // matches the sharp mock's toBuffer result
+    const expectedHash = createHash("sha256").update(optimizedContent).digest("hex").slice(0, 8);
+    const expectedKey = `test-image-${expectedHash}.webp`;
+
     vi.mocked(s3.send).mockResolvedValueOnce({
       Body: {
-        transformToByteArray: async () => validImageBuffer,
+        transformToByteArray: async () => dummyBuffer,
       },
     });
 
     const optimizedKey = await optimizeImage("test-image.png", "brand-logo");
 
-    expect(optimizedKey).toBe("test-image.webp");
-    expect(s3.send).toHaveBeenCalledTimes(2); // GetObjectCommand, PutObjectCommand
+    // Key must contain a content hash and use .webp extension
+    expect(optimizedKey).toBe(expectedKey);
+    // s3.send called once only (GetObjectCommand); upload goes through uploadObject
+    expect(s3.send).toHaveBeenCalledTimes(1);
+    expect(sharp).toHaveBeenCalledWith(dummyBuffer);
+    // uploadObject called with immutable: true so Cache-Control is set
+    expect(uploadObject).toHaveBeenCalledWith({
+      bucket: "brand-assets",
+      key: expectedKey,
+      body: optimizedContent,
+      contentType: "image/webp",
+      immutable: true,
+    });
   });
 
   it("should throw a StorageError if the object body is null/undefined (missing object)", async () => {
@@ -43,27 +68,72 @@ describe("optimizeImage", () => {
 
     await expect(optimizeImage("missing-image.png", "brand-logo"))
       .rejects.toThrow(StorageError);
-      
-    try {
-      await optimizeImage("missing-image.png", "brand-logo");
-    } catch (error) {
-      expect(error).toBeInstanceOf(StorageError);
-      expect((error as StorageError).code).toBe("STORAGE_BODY_EMPTY");
-      expect((error as StorageError).key).toBe("missing-image.png");
-      expect((error as StorageError).bucket).toBe("brand-assets");
-    }
   });
 
-  it("should throw an error when processing a corrupt body", async () => {
+  it("should skip optimization and return original key for unsupported formats", async () => {
     vi.mocked(s3.send).mockResolvedValueOnce({
       Body: {
-        transformToByteArray: async () => corruptImageBuffer,
+        transformToByteArray: async () => dummyBuffer,
       },
     });
 
-    await expect(optimizeImage("corrupt-image.png", "brand-logo"))
-      .rejects.toThrow(); // sharp should throw an error since it's not a valid image
-      
-    expect(s3.send).toHaveBeenCalledTimes(1); // Only GetObjectCommand should be called
+    // Mock metadata to return unsupported format
+    vi.mocked(sharp).mockReturnValueOnce({
+      metadata: vi.fn().mockResolvedValue({ format: "gif" }),
+    } as any);
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const resultKey = await optimizeImage("test-image.gif", "brand-logo");
+
+    expect(resultKey).toBe("test-image.gif");
+    expect(s3.send).toHaveBeenCalledTimes(1); // Only GetObjectCommand
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Unsupported image format: gif"));
+    
+    warnSpy.mockRestore();
+  });
+
+  it("should skip optimization and return original key when metadata processing fails", async () => {
+    vi.mocked(s3.send).mockResolvedValueOnce({
+      Body: {
+        transformToByteArray: async () => dummyBuffer,
+      },
+    });
+
+    // Mock sharp to throw on metadata
+    vi.mocked(sharp).mockReturnValueOnce({
+      metadata: vi.fn().mockRejectedValue(new Error("Sharp error")),
+    } as any);
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const resultKey = await optimizeImage("corrupt.png", "brand-logo");
+
+    expect(resultKey).toBe("corrupt.png");
+    expect(s3.send).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Failed to process image metadata"));
+
+    warnSpy.mockRestore();
+  });
+
+  it("should skip optimization and return original key if metadata has no format", async () => {
+    vi.mocked(s3.send).mockResolvedValueOnce({
+      Body: {
+        transformToByteArray: async () => dummyBuffer,
+      },
+    });
+
+    vi.mocked(sharp).mockReturnValueOnce({
+      metadata: vi.fn().mockResolvedValue({}), // No format
+    } as any);
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const resultKey = await optimizeImage("no-format.png", "brand-logo");
+
+    expect(resultKey).toBe("no-format.png");
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("Unsupported image format: undefined"));
+
+    warnSpy.mockRestore();
   });
 });

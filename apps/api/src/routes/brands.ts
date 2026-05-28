@@ -5,7 +5,11 @@ import {
   createBrand,
   getBrandsByOwner,
   getBrandById,
+  getBrandMetaById,
+  getActiveDistractorBrands,
+  toBrandApi,
   updateBrand,
+  deleteBrand,
 } from "../db/queries/brands";
 import {
   createChallenge,
@@ -15,6 +19,7 @@ import { generateChallengeQuestions } from "../services/questions";
 import { optimizeImage, StorageError } from "@brandblitz/storage";
 import { authenticate } from "../middleware/authenticate";
 import { createError } from "../middleware/error";
+import { logger } from "../lib/logger";
 import { config } from "../lib/config";
 
 const router = Router();
@@ -44,7 +49,7 @@ const ChallengeSchema = z.object({
  */
 router.get("/", authenticate, async (req, res) => {
   const brands = await getBrandsByOwner(req.user!.sub);
-  res.json({ brands });
+  res.json({ brands: brands.map(toBrandApi) });
 });
 
 /**
@@ -54,7 +59,22 @@ router.get("/:id", authenticate, async (req, res) => {
   const brand = await getBrandById(req.params.id);
   if (!brand) throw createError("Brand not found", 404);
   if (brand.owner_user_id !== req.user!.sub) throw createError("Forbidden", 403);
-  res.json({ brand });
+  res.json({ brand: toBrandApi(brand) });
+});
+
+/**
+ * DELETE /brands/:id
+ * Soft-delete a brand kit (prevents new activity; existing challenges continue).
+ */
+router.delete("/:id", authenticate, async (req, res) => {
+  const meta = await getBrandMetaById(req.params.id);
+  if (!meta || meta.deleted_at) throw createError("Brand not found", 404);
+  if (meta.owner_user_id !== req.user!.sub) throw createError("Forbidden", 403);
+
+  const deleted = await deleteBrand(req.params.id, req.user!.sub);
+  if (!deleted) throw createError("Brand not found", 404);
+
+  res.status(204).send();
 });
 
 /**
@@ -66,8 +86,7 @@ router.post("/", authenticate, async (req, res) => {
   const userId = req.user!.sub;
 
   let logoUrl: string | undefined;
-  let productImage1Url: string | undefined;
-  let productImage2Url: string | undefined;
+  const productImageKeys: string[] = [];
 
   // Optimize uploaded images server-side (converts to WebP, resizes)
   try {
@@ -78,13 +97,11 @@ router.post("/", authenticate, async (req, res) => {
     }
     if (body.productImage1Key) {
       const optimizedKey = await optimizeImage(body.productImage1Key, "product-image");
-      const { getPublicUrl, BUCKETS } = await import("@brandblitz/storage");
-      productImage1Url = getPublicUrl(BUCKETS.BRAND_ASSETS, optimizedKey);
+      productImageKeys.push(optimizedKey);
     }
     if (body.productImage2Key) {
       const optimizedKey = await optimizeImage(body.productImage2Key, "product-image");
-      const { getPublicUrl, BUCKETS } = await import("@brandblitz/storage");
-      productImage2Url = getPublicUrl(BUCKETS.BRAND_ASSETS, optimizedKey);
+      productImageKeys.push(optimizedKey);
     }
   } catch (error) {
     if (error instanceof StorageError || (error as any).name === "StorageError") {
@@ -103,11 +120,10 @@ router.post("/", authenticate, async (req, res) => {
     tagline: body.tagline ?? null,
     brand_story: body.brandStory ?? null,
     usp: body.usp ?? null,
-    product_image_1_url: productImage1Url ?? null,
-    product_image_2_url: productImage2Url ?? null,
+    product_image_keys: productImageKeys,
   });
 
-  res.status(201).json({ brand });
+  res.status(201).json({ brand: toBrandApi(brand) });
 });
 
 /**
@@ -131,8 +147,16 @@ router.post("/challenges", authenticate, async (req, res) => {
     endsAt: body.endsAt,
   });
 
+  const distractorBrands = await getActiveDistractorBrands(body.brandId);
+  if (distractorBrands.length === 0) {
+    logger.warn("Distractor pool is empty; using fallback options for generated questions", {
+      brandId: body.brandId,
+      challengeId: challenge.id,
+    });
+  }
+
   // Auto-generate questions from brand kit (uses other brands as distractors if available)
-  const questions = generateChallengeQuestions(challenge.id, brand, []);
+  const questions = generateChallengeQuestions(challenge.id, brand, distractorBrands);
   await insertChallengeQuestions(questions);
 
   res.status(201).json({

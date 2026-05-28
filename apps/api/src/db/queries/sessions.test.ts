@@ -73,7 +73,7 @@ describeIntegration("sessions db queries", () => {
         warmup_started_at TIMESTAMPTZ,
         warmup_completed_at TIMESTAMPTZ,
         challenge_started_at TIMESTAMPTZ,
-        challenge_ended_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ,
         round_1_score INTEGER NOT NULL DEFAULT 0,
         round_2_score INTEGER NOT NULL DEFAULT 0,
         round_3_score INTEGER NOT NULL DEFAULT 0,
@@ -84,6 +84,10 @@ describeIntegration("sessions db queries", () => {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE (user_id, challenge_id)
       )
+    `);
+    await query(`
+      CREATE INDEX idx_game_sessions_user_id_completed_at
+      ON game_sessions (user_id, completed_at DESC)
     `);
     await query(`
       CREATE TABLE session_round_scores (
@@ -201,7 +205,7 @@ describeIntegration("sessions db queries", () => {
 
     const finished = await sessions.finishSession(session.id);
 
-    expect(finished.challenge_ended_at).toBeTruthy();
+    expect(finished.completed_at).toBeTruthy();
     expect(finished.total_score).toBe(366);
   });
 
@@ -251,11 +255,11 @@ describeIntegration("sessions db queries", () => {
     }
 
     await sessions.flagSession(flagged.id, ["bot"]);
-    await query("UPDATE game_sessions SET challenge_ended_at = $2 WHERE id = $1", [
+    await query("UPDATE game_sessions SET completed_at = $2 WHERE id = $1", [
       fastTie.id,
       "2026-01-01T00:00:00.000Z",
     ]);
-    await query("UPDATE game_sessions SET challenge_ended_at = $2 WHERE id = $1", [
+    await query("UPDATE game_sessions SET completed_at = $2 WHERE id = $1", [
       slowTie.id,
       "2026-01-01T00:00:05.000Z",
     ]);
@@ -271,5 +275,46 @@ describeIntegration("sessions db queries", () => {
     expect(leaderboard.map((entry) => entry.username)).toHaveLength(3);
     expect(leaderboard.some((entry) => entry.user_id === flaggedUser)).toBe(false);
     expect(leaderboard.some((entry) => entry.user_id === practiceUser)).toBe(false);
+  });
+
+  it("uses the recent sessions index for profile lookups under 5ms", async () => {
+    const userId = await createUser("profile-sessions");
+
+    for (let index = 0; index < 1000; index += 1) {
+      const challengeId = await createChallenge();
+      const session = await sessions.createSession({ userId, challengeId });
+
+      await query(
+        `UPDATE game_sessions
+         SET status = 'completed',
+             completed_at = NOW() - ($2::int * INTERVAL '1 minute'),
+             total_score = $3
+         WHERE id = $1`,
+        [session.id, index, index]
+      );
+    }
+
+    const plan = await query<{
+      "QUERY PLAN": [
+        {
+          Plan: { "Node Type": string; Plans?: unknown[] };
+          "Execution Time": number;
+        },
+      ];
+    }>(
+      `EXPLAIN (ANALYZE, FORMAT JSON)
+       SELECT id, challenge_id, completed_at, total_score
+       FROM game_sessions
+       WHERE user_id = $1
+       ORDER BY completed_at DESC
+       LIMIT 20`,
+      [userId]
+    );
+
+    const analyzed = plan.rows[0]["QUERY PLAN"][0];
+    const serializedPlan = JSON.stringify(analyzed.Plan);
+
+    expect(serializedPlan).toContain("idx_game_sessions_user_id_completed_at");
+    expect(analyzed["Execution Time"]).toBeLessThan(5);
   });
 });

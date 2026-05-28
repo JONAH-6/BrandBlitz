@@ -26,6 +26,7 @@ services:
       - "3001:3001"
     environment:
       NODE_ENV: development
+      E2E_MOCK_GOOGLE_OAUTH: ${E2E_MOCK_GOOGLE_OAUTH:-true}
 
   worker:
     build:
@@ -48,3 +49,6 @@ services:
       - "3000:3000"
     environment:
       NODE_ENV: development
+      NEXTAUTH_API_URL: http://api:3001
+      NEXT_PUBLIC_E2E_MOCK_GOOGLE_OAUTH: ${E2E_MOCK_GOOGLE_OAUTH:-true}
+      E2E_MOCK_GOOGLE_OAUTH: ${E2E_MOCK_GOOGLE_OAUTH:-true}

@@ -1,0 +1,97 @@
+name: DB dual-path convergence
+
+on:
+  push:
+    paths:
+      - 'init.sql'
+      - 'migrations/**'
+      - 'docs/DATABASE.md'
+      - 'docs/db/er.svg'
+  pull_request:
+    paths:
+      - 'init.sql'
+      - 'migrations/**'
+      - 'docs/DATABASE.md'
+      - 'docs/db/er.svg'
+
+jobs:
+  dual-path:
+    runs-on: ubuntu-latest
+
+    services:
+      fresh_db:
+        image: postgres:17
+        env:
+          POSTGRES_DB: brandblitz_fresh
+          POSTGRES_USER: bb
+          POSTGRES_PASSWORD: bb
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U bb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      migration_db:
+        image: postgres:17
+        env:
+          POSTGRES_DB: brandblitz_migration
+          POSTGRES_USER: bb
+          POSTGRES_PASSWORD: bb
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U bb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install psql client
+        run: sudo apt-get install -y postgresql-client
+
+      # ── Fresh path ────────────────────────────────────────────────────────
+      - name: Seed fresh DB from init.sql
+        env:
+          PGPASSWORD: bb
+        run: psql -h localhost -p 5433 -U bb -d brandblitz_fresh -f init.sql
+
+      # ── Migration path ────────────────────────────────────────────────────
+      - name: Apply migrations in order
+        env:
+          PGPASSWORD: bb
+        run: |
+          for f in $(ls migrations/*.sql | sort); do
+            echo "Applying $f"
+            psql -h localhost -p 5434 -U bb -d brandblitz_migration -f "$f"
+          done
+
+      # ── Schema diff ───────────────────────────────────────────────────────
+      - name: Dump fresh schema
+        env:
+          PGPASSWORD: bb
+        run: pg_dump -h localhost -p 5433 -U bb -d brandblitz_fresh --schema-only > /tmp/schema_fresh.sql
+
+      - name: Dump migration schema
+        env:
+          PGPASSWORD: bb
+        run: pg_dump -h localhost -p 5434 -U bb -d brandblitz_migration --schema-only > /tmp/schema_migration.sql
+
+      - name: Assert schemas converge
+        run: |
+          grep -v '^--' /tmp/schema_fresh.sql | sort > /tmp/fresh_sorted.sql
+          grep -v '^--' /tmp/schema_migration.sql | sort > /tmp/migration_sorted.sql
+          diff /tmp/fresh_sorted.sql /tmp/migration_sorted.sql && echo "Schemas match" || (echo "Schema divergence detected" && exit 1)
+
+      - name: Install tbls
+        run: |
+          GOBIN=$HOME/go/bin go install github.com/k1LoW/tbls@latest
+
+      - name: Assert ER diagram is up-to-date
+        run: |
+          mkdir -p /tmp/tbls-docs
+          PATH="$HOME/go/bin:$PATH" tbls doc "postgresql://bb:bb@localhost:5433/brandblitz_fresh?sslmode=disable" /tmp/tbls-docs --er-format svg --force
+          cmp -s /tmp/tbls-docs/schema.svg docs/db/er.svg

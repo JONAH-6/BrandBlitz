@@ -8,14 +8,19 @@ export interface GameSession {
   warmup_started_at: string | null;
   warmup_completed_at: string | null;
   challenge_started_at: string | null;
-  challenge_ended_at: string | null;
+  completed_at: string | null;
+  round_1_answer: string | null;
   round_1_score: number;
+  round_2_answer: string | null;
   round_2_score: number;
+  round_3_answer: string | null;
   round_3_score: number;
   total_score: number;
+  rank: number | null;
   flagged: boolean;
   flag_reasons: string[] | null;
   is_practice: boolean;
+  integrity_hmac: string | null;
   created_at: string;
 }
 
@@ -26,6 +31,15 @@ export interface RoundScore {
   score: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface LeaderboardSession extends GameSession {
+  username: string;
+  avatar_url: string;
+  display_name: string;
+  league: "bronze" | "silver" | "gold" | null;
+  total_earned_usdc: string;
+  stellar_address: string | null;
 }
 
 export async function createSession(data: {
@@ -88,34 +102,41 @@ export async function markChallengeStarted(sessionId: string): Promise<void> {
 export async function recordRoundScore(
   sessionId: string,
   round: 1 | 2 | 3,
-  score: number
+  score: number,
+  answer: string | null = null,
+  reactionTimeMs: number | null = null
 ): Promise<void> {
   if (![1, 2, 3].includes(round)) {
     throw new Error("Invalid round");
   }
 
   const roundColumn = `round_${round}_score`;
+  const answerColumn = `round_${round}_answer`;
+  const reactionColumn = `round_${round}_reaction_ms`;
 
   await query(
     `WITH upserted AS (
-       INSERT INTO session_round_scores (session_id, round, score)
-       VALUES ($1, $2, $3)
+       INSERT INTO session_round_scores (session_id, round, score, answer, reaction_time_ms)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (session_id, round) DO UPDATE
          SET score = EXCLUDED.score,
-             updated_at = NOW()
-       RETURNING session_id, score
+             answer = EXCLUDED.answer,
+             reaction_time_ms = EXCLUDED.reaction_time_ms
+       RETURNING session_id, score, answer, reaction_time_ms
      )
      UPDATE game_sessions
-     SET ${roundColumn} = (SELECT score FROM upserted)
+     SET ${roundColumn} = (SELECT score FROM upserted),
+         ${answerColumn} = (SELECT answer FROM upserted),
+         ${reactionColumn} = (SELECT reaction_time_ms FROM upserted)
      WHERE id = $1`,
-    [sessionId, round, score]
+    [sessionId, round, score, answer, reactionTimeMs]
   );
 }
 
 export async function finishSession(sessionId: string): Promise<GameSession> {
   const result = await query<GameSession>(
     `UPDATE game_sessions
-     SET challenge_ended_at = NOW(),
+     SET completed_at = NOW(),
          status = 'completed',
          total_score = COALESCE((
            SELECT SUM(score)::int
@@ -127,6 +148,13 @@ export async function finishSession(sessionId: string): Promise<GameSession> {
     [sessionId]
   );
   return result.rows[0];
+}
+
+export async function storeSessionHmac(sessionId: string, hmac: string): Promise<void> {
+  await query(
+    "UPDATE game_sessions SET integrity_hmac = $1 WHERE id = $2",
+    [hmac, sessionId]
+  );
 }
 
 export async function flagSession(
@@ -147,15 +175,24 @@ export async function getLeaderboard(
   challengeId: string,
   limit = 20,
   offset = 0
-): Promise<Array<GameSession & { username: string; avatar_url: string }>> {
-  const result = await query<GameSession & { username: string; avatar_url: string }>(
-    `SELECT gs.*, u.email as username, u.avatar_url
+): Promise<LeaderboardSession[]> {
+  const result = await query<LeaderboardSession>(
+    `SELECT gs.*,
+            u.email AS username,
+            u.avatar_url,
+            u.display_name,
+            u.league,
+            u.total_earned_usdc,
+            COALESCE(
+              NULLIF(to_jsonb(u) ->> 'embedded_wallet_address', ''),
+              NULLIF(to_jsonb(u) ->> 'stellar_address', '')
+            ) AS stellar_address
      FROM game_sessions gs
      JOIN users u ON gs.user_id = u.id
      WHERE gs.challenge_id = $1
        AND gs.flagged = FALSE
        AND gs.is_practice = FALSE
-     ORDER BY gs.total_score DESC, gs.challenge_ended_at ASC
+     ORDER BY gs.total_score DESC, gs.completed_at ASC
      LIMIT $2 OFFSET $3`,
     [challengeId, limit, offset]
   );

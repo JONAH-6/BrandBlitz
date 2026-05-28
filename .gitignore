@@ -43,5 +43,10 @@ coverage
 # MinIO data (dev)
 data/
 
+# Tool caches
+.cache/
+
 # Type-checked output
 *.tsbuildinfo
+
+fix.md

@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,7 +14,19 @@ interface ResultScreenProps {
 }
 
 export function ResultScreen({ totalScore, rank, estimatedUsdc, challengeId }: ResultScreenProps) {
+  const [shareToast, setShareToast] = useState<string | null>(null);
   const shareText = `I just scored ${formatScore(totalScore)} in a BrandBlitz challenge${estimatedUsdc ? ` and earned ~${formatUsdc(estimatedUsdc)} USDC` : ""}! 🏆`;
+  const leaderboardHref = `/challenge/${challengeId}`;
+
+  async function handleShare(): Promise<void> {
+    if (navigator.share) {
+      await navigator.share({ text: shareText, url: window.location.href });
+      return;
+    }
+
+    await navigator.clipboard.writeText(shareText);
+    setShareToast("Result copied to clipboard.");
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6">
@@ -44,11 +57,7 @@ export function ResultScreen({ totalScore, rank, estimatedUsdc, challengeId }: R
           <div className="flex flex-col gap-3">
             <Button
               onClick={() => {
-                if (navigator.share) {
-                  navigator.share({ text: shareText, url: window.location.href });
-                } else {
-                  navigator.clipboard.writeText(shareText);
-                }
+                void handleShare();
               }}
               variant="outline"
               className="w-full"
@@ -56,16 +65,22 @@ export function ResultScreen({ totalScore, rank, estimatedUsdc, challengeId }: R
               Share Result
             </Button>
 
-            <Link href={`/challenge/${challengeId}`} passHref>
-              <Button variant="secondary" className="w-full">
+            <Button asChild variant="secondary" className="w-full">
+              <Link href={leaderboardHref}>
                 View Leaderboard
-              </Button>
-            </Link>
+              </Link>
+            </Button>
 
-            <Link href="/" passHref>
-              <Button className="w-full">Play Another Challenge</Button>
-            </Link>
+            <Button asChild className="w-full">
+              <Link href="/">Play Another Challenge</Link>
+            </Button>
           </div>
+
+          {shareToast ? (
+            <p role="status" aria-live="polite" className="text-sm font-medium text-green-700">
+              {shareToast}
+            </p>
+          ) : null}
         </CardContent>
       </Card>
     </div>

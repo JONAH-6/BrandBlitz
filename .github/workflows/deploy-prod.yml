@@ -1,0 +1,115 @@
+name: Deploy (prod)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to deploy (e.g. v1.2.3)"
+        required: true
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  staging-healthcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Pre-deploy healthcheck (staging)
+        env:
+          STAGING_BASE_URL: ${{ secrets.STAGING_BASE_URL }}
+        run: |
+          test -n "$STAGING_BASE_URL"
+          curl -fsSL "$STAGING_BASE_URL/api/health" >/dev/null
+          curl -fsSL "$STAGING_BASE_URL/" >/dev/null
+
+  deploy:
+    needs: [staging-healthcheck]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine tag + previous tag
+        id: tags
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          git fetch --tags --force
+          PREV_TAG="$(git tag --list 'v*' --sort=-version:refname | grep -v "^${TAG}$" | head -n 1)"
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy (pull exact tagged images)
+        id: deploy
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.PROD_APP_DIR }}"
+            export APP_VERSION="${{ steps.tags.outputs.tag }}"
+            export IMAGE_REGISTRY="${{ secrets.IMAGE_REGISTRY }}"
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull api worker web
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
+
+            BASE_URL="${{ secrets.PROD_BASE_URL }}"
+            test -n "$BASE_URL"
+            curl -fsSL "$BASE_URL/api/health" >/dev/null
+            curl -fsSL "$BASE_URL/" >/dev/null
+
+      - name: Auto-rollback on failure (previous tag)
+        if: failure() && steps.tags.outputs.prev_tag != ''
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.PROD_APP_DIR }}"
+            export APP_VERSION="${{ steps.tags.outputs.prev_tag }}"
+            export IMAGE_REGISTRY="${{ secrets.IMAGE_REGISTRY }}"
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull api worker web
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
+
+      - name: Notify Slack (success)
+        if: success() && secrets.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v1.27.1
+        with:
+          payload: |
+            {"text":"✅ Prod deploy succeeded: ${{ github.repository }} @ ${{ steps.tags.outputs.tag }}"}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify Slack (failure)
+        if: failure() && secrets.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v1.27.1
+        with:
+          payload: |
+            {"text":"❌ Prod deploy failed: ${{ github.repository }} @ ${{ steps.tags.outputs.tag }}"}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+

@@ -1,13 +1,36 @@
 "use client";
 
-import { signIn } from "next-auth/react";
-import { useSearchParams } from "next/navigation";
+import { useEffect, useMemo } from "react";
+import { signIn, useSession } from "next-auth/react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import LoginLoading from "./loading";
 
 export default function LoginPage() {
+  const { status } = useSession();
+  const router = useRouter();
   const searchParams = useSearchParams();
   const callbackUrl = searchParams.get("callbackUrl") ?? "/";
+  const providerId = process.env.NEXT_PUBLIC_E2E_MOCK_GOOGLE_OAUTH === "true" ? "google-mock" : "google";
+  const mockSignInOptions = useMemo(
+    () => ({
+      callbackUrl,
+      email: searchParams.get("mockEmail") ?? "e2e-player@example.com",
+      name: searchParams.get("mockName") ?? "E2E Player",
+    }),
+    [callbackUrl, searchParams]
+  );
+
+  useEffect(() => {
+    if (status === "authenticated") {
+      router.replace(callbackUrl);
+    }
+  }, [status, router, callbackUrl]);
+
+  if (status === "loading") {
+    return <LoginLoading />;
+  }
 
   return (
     <Card className="w-full max-w-sm">
@@ -19,7 +42,9 @@ export default function LoginPage() {
         <Button
           className="w-full"
           size="lg"
-          onClick={() => signIn("google", { callbackUrl })}
+          onClick={() =>
+            signIn(providerId, providerId === "google-mock" ? mockSignInOptions : { callbackUrl })
+          }
         >
           <svg className="mr-2 h-4 w-4" viewBox="0 0 24 24" aria-hidden="true">
             <path

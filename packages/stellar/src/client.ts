@@ -32,4 +32,5 @@ export function getNetworkPassphrase(network: NetworkName = "testnet"): string {
   return STELLAR_NETWORKS[network].networkPassphrase;
 }
 
+export type { NetworkName };
 export { Keypair, Asset, TransactionBuilder, BASE_FEE, Networks };

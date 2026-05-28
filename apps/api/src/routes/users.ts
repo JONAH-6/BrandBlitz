@@ -3,11 +3,17 @@ import { z } from "zod";
 import crypto from "crypto";
 import {
   findUserById,
+  findUserByPhoneHash,
   markPhoneVerified,
   updateUserWallet,
   getUserPublicProfileByUsername,
 } from "../db/queries/users";
-import { sendVerificationCode, checkVerificationCode } from "../services/phone";
+import {
+  sendVerificationCode,
+  checkVerificationCode,
+  hashPhoneNumber,
+  normalizePhoneNumber,
+} from "../services/phone";
 import { authenticate } from "../middleware/authenticate";
 import { createError } from "../middleware/error";
 import { redis } from "../lib/redis";
@@ -91,8 +97,6 @@ router.get("/profile/:username", apiLimiter, async (req, res) => {
 
 /**
  * PATCH /users/me/wallet
-...
-
  */
 router.patch("/me/wallet", authenticate, async (req, res) => {
   const { stellarAddress } = z
@@ -108,15 +112,16 @@ router.patch("/me/wallet", authenticate, async (req, res) => {
  * Send SMS verification code via Twilio.
  */
 router.post("/me/phone/send", authenticate, async (req, res) => {
-  const { phone } = z.object({ phone: z.string().min(10) }).parse(req.body);
+  const { phone } = z.object({ phone: z.string().min(1) }).parse(req.body);
+  const normalizedPhone = normalizePhoneNumber(phone);
 
   // Rate limit: 3 sends per phone per 5 minutes
-  const key = `phone:send:${phone}`;
+  const key = `phone:send:${normalizedPhone}`;
   const sends = await redis.incr(key);
   if (sends === 1) await redis.expire(key, 300);
   if (sends > 3) throw createError("Too many verification attempts", 429);
 
-  await sendVerificationCode(phone);
+  await sendVerificationCode(normalizedPhone);
   res.json({ success: true });
 });
 
@@ -129,15 +134,15 @@ router.post("/me/phone/verify", authenticate, async (req, res) => {
     .object({ phone: z.string(), code: z.string().length(6) })
     .parse(req.body);
 
-  // Check phone not already used by another account
-  const phoneHash = crypto.createHash("sha256").update(phone).digest("hex");
-  const existingKey = `phone:hash:${phoneHash}`;
-  const existingUser = await redis.get(existingKey);
-  if (existingUser && existingUser !== req.user!.sub) {
+  const normalizedPhone = normalizePhoneNumber(phone);
+  const phoneHash = hashPhoneNumber(normalizedPhone);
+
+  const existingUser = await findUserByPhoneHash(phoneHash);
+  if (existingUser && existingUser.id !== req.user!.sub) {
     throw createError("Phone number already associated with another account", 409);
   }
 
-  const approved = await checkVerificationCode(phone, code);
+  const approved = await checkVerificationCode(normalizedPhone, code);
   if (!approved) {
     const attemptsKey = `phone:verify:${phoneHash}`;
     const attempts = await redis.incr(attemptsKey);
@@ -145,6 +150,7 @@ router.post("/me/phone/verify", authenticate, async (req, res) => {
     throw createError("Invalid verification code", 400);
   }
 
+  const existingKey = `phone:hash:${phoneHash}`;
   await markPhoneVerified(req.user!.sub, phoneHash);
   await redis.set(existingKey, req.user!.sub, "EX", 86400 * 365);
   await redis.del(`phone:verify:${phoneHash}`);

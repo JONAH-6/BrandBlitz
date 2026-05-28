@@ -20,8 +20,10 @@
 - [Prerequisites](#prerequisites)
 - [Quick Start (Docker)](#quick-start-docker)
 - [Quick Start (Local)](#quick-start-local)
+- [Running Tests](#running-tests)
 - [Environment Variables](#environment-variables)
 - [Services & Ports](#services--ports)
+- [E2E](#e2e)
 - [Game Flow (Technical)](#game-flow-technical)
 - [Stellar Integration](#stellar-integration)
 - [Anti-Cheat](#anti-cheat)
@@ -344,8 +346,10 @@ See [`.env.example`](./.env.example) for all variables with inline documentation
 | `GOOGLE_CLIENT_ID/SECRET` | Google OAuth credentials |
 | `STELLAR_HOT_WALLET_SECRET` | Stellar keypair for payouts |
 | `STELLAR_NETWORK` | `testnet` or `public` |
-| `S3_*` | Storage endpoint, credentials, bucket |
+| `S3_*` | Storage endpoint, credentials, bucket (`S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`) |
 | `WEBHOOK_SECRET` | Protects `/webhooks/stellar` |
+| `PHONE_HASH_SALT` | HMAC salt for phone-number hashing (32-byte random) |
+| `NEXTAUTH_API_URL` | Internal URL next-auth uses to reach the API (e.g. `http://localhost/api`) |
 
 ---
 
@@ -363,6 +367,33 @@ See [`.env.example`](./.env.example) for all variables with inline documentation
 | minio-console | 9001 | MinIO admin UI |
 
 Only port 80 (and 443 in prod) is exposed externally in the Docker stack.
+
+---
+
+## E2E
+
+The Playwright suite lives in [`e2e/`](./e2e) and targets the live Docker dev stack with `baseURL=http://localhost:3000`.
+
+```bash
+docker compose up -d --build
+pnpm e2e
+```
+
+What it covers:
+
+- Mocked Google OAuth sign-in to the real web app, ending on `/dashboard`
+- Brand creation through the UI, followed by deposit instructions
+- Full player golden path: warmup wait, challenge start, 3 rounds, results screen
+
+Artifacts:
+
+- Trace, video, and screenshots are retained on failure in `e2e/artifacts/`
+- In CI, upload `e2e/artifacts/` as the job artifact directory
+
+Notes:
+
+- The Docker dev override enables the mocked Google OAuth path used by Playwright.
+- The suite assumes the stack is already running; it does not start containers for you.
 
 ---
 
@@ -508,12 +539,36 @@ Production differences from dev:
 
 ---
 
+## Running Tests
+
+Vitest is configured at the monorepo root with per-workspace project configs.
+
+```bash
+# Run all workspace tests
+pnpm test
+
+# Run all workspace tests with v8 coverage
+pnpm test:coverage
+
+# Run tests for one workspace
+pnpm --filter @brandblitz/api test
+pnpm --filter @brandblitz/web test
+pnpm --filter @brandblitz/stellar test
+pnpm --filter @brandblitz/storage test
+```
+
+Shared test setup is in `tests/setup.ts` and includes reusable DB test helpers based on test schema prefixes.
+
+---
+
 ## Workspace Scripts
 
 ```bash
 pnpm dev          # Start all apps in parallel (Turborepo)
 pnpm build        # Build all packages and apps
 pnpm test         # Run all test suites
+pnpm e2e          # Run Playwright end-to-end tests against docker-compose
+pnpm test:coverage # Run all test suites with coverage
 pnpm lint         # Lint all packages
 pnpm type-check   # TypeScript type-check everything
 pnpm format       # Prettier format all .ts/.tsx/.json files

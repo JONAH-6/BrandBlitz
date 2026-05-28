@@ -1,10 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{
-    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation},
-    token, vec, Address, Env, IntoVal, String,
-};
+use soroban_sdk::{testutils::Address as _, token, vec, Address, Env, String};
 
 fn create_token<'a>(
     env: &Env,
@@ -17,35 +14,101 @@ fn create_token<'a>(
     )
 }
 
-#[test]
-fn test_deposit_and_settle() {
+fn setup() -> (
+    Env,
+    Address,
+    Address,
+    Address,
+    token::Client<'static>,
+    EscrowContractClient<'static>,
+) {
     let env = Env::default();
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
     let brand = Address::generate(&env);
-    let winner1 = Address::generate(&env);
-    let winner2 = Address::generate(&env);
-
     let (usdc, usdc_admin) = create_token(&env, &admin);
-
-    // Mint 1000 USDC to brand
     usdc_admin.mint(&brand, &1_000_0000000_i128);
 
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
 
-    let memo = String::from_str(&env, "BLITZ-ABC123");
+    (env, admin, brand, usdc.address.clone(), usdc, client)
+}
 
-    // Initialize
-    client.initialize(&admin, &usdc.address, &memo);
+#[test]
+fn test_initialize() {
+    let (env, admin, _, token, _, client) = setup();
+    let memo = String::from_str(&env, "BLITZ-INIT");
 
-    // Deposit 100 USDC
+    assert_eq!(client.try_initialize(&admin, &token, &memo), Ok(Ok(())));
+    assert_eq!(client.memo(), memo);
+    assert!(!client.is_settled());
+    assert_eq!(client.balance(), 0);
+}
+
+#[test]
+fn test_initialize_twice_fails() {
+    let (env, admin, _, token, _, client) = setup();
+    let memo = String::from_str(&env, "BLITZ-DUP");
+
+    client.initialize(&admin, &token, &memo);
+    assert_eq!(
+        client.try_initialize(&admin, &token, &memo),
+        Err(Ok(ContractError::AlreadyInitialized))
+    );
+}
+
+#[test]
+fn test_deposit_and_views() {
+    let (env, admin, brand, token, _, client) = setup();
+    client.initialize(&admin, &token, &String::from_str(&env, "BLITZ-VIEWS"));
+
     client.deposit(&brand, &100_0000000_i128);
     assert_eq!(client.balance(), 100_0000000_i128);
     assert!(!client.is_settled());
+}
 
-    // Settle: winner1 gets 60, winner2 gets 40
+#[test]
+fn test_deposit_zero_fails() {
+    let (env, admin, brand, token, _, client) = setup();
+    client.initialize(&admin, &token, &String::from_str(&env, "BLITZ-ZERO"));
+
+    assert_eq!(
+        client.try_deposit(&brand, &0_i128),
+        Err(Ok(ContractError::InvalidAmount))
+    );
+}
+
+#[test]
+fn test_deposit_negative_fails() {
+    let (env, admin, brand, token, _, client) = setup();
+    client.initialize(&admin, &token, &String::from_str(&env, "BLITZ-NEG"));
+
+    assert_eq!(
+        client.try_deposit(&brand, &-10_i128),
+        Err(Ok(ContractError::InvalidAmount))
+    );
+}
+
+#[test]
+fn test_deposit_auth_check() {
+    let (env, admin, brand, token, _, client) = setup();
+    client.initialize(&admin, &token, &String::from_str(&env, "BLITZ-AUTH"));
+
+    env.mock_auths(&[]);
+    assert!(client.try_deposit(&brand, &100_0000000_i128).is_err());
+}
+
+#[test]
+fn test_settle_happy_path() {
+    let (env, admin, brand, token, usdc, client) = setup();
+    let winner1 = Address::generate(&env);
+    let winner2 = Address::generate(&env);
+
+    client.initialize(&admin, &token, &String::from_str(&env, "BLITZ-SETTLE"));
+    client.deposit(&brand, &100_0000000_i128);
+
     let recipients = vec![
         &env,
         (winner1.clone(), 60_0000000_i128),
@@ -60,54 +123,88 @@ fn test_deposit_and_settle() {
 }
 
 #[test]
-fn test_refund() {
-    let env = Env::default();
-    env.mock_all_auths();
+fn test_settle_non_admin_fails() {
+    let (env, admin, brand, token, _, client) = setup();
+    let winner = Address::generate(&env);
+    client.initialize(&admin, &token, &String::from_str(&env, "BLITZ-NONADMIN"));
+    client.deposit(&brand, &100_0000000_i128);
 
-    let admin = Address::generate(&env);
-    let brand = Address::generate(&env);
-    let (usdc, usdc_admin) = create_token(&env, &admin);
+    let recipients = vec![&env, (winner.clone(), 100_0000000_i128)];
 
-    usdc_admin.mint(&brand, &500_0000000_i128);
-
-    let contract_id = env.register(EscrowContract, ());
-    let client = EscrowContractClient::new(&env, &contract_id);
-
-    client.initialize(&admin, &usdc.address, &String::from_str(&env, "BLITZ-XYZ999"));
-    client.deposit(&brand, &200_0000000_i128);
-
-    assert_eq!(usdc.balance(&brand), 300_0000000_i128);
-
-    client.refund();
-
-    assert!(client.is_settled());
-    assert_eq!(client.balance(), 0);
-    // Brand gets full refund
-    assert_eq!(usdc.balance(&brand), 500_0000000_i128);
+    env.mock_auths(&[]); // no auth
+    assert!(client.try_settle(&recipients).is_err());
 }
 
 #[test]
-#[should_panic(expected = "already settled")]
-fn test_double_settle_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let admin = Address::generate(&env);
-    let brand = Address::generate(&env);
+fn test_settle_already_settled() {
+    let (env, admin, brand, token, _, client) = setup();
     let winner = Address::generate(&env);
-    let (usdc, usdc_admin) = create_token(&env, &admin);
-
-    usdc_admin.mint(&brand, &100_0000000_i128);
-
-    let contract_id = env.register(EscrowContract, ());
-    let client = EscrowContractClient::new(&env, &contract_id);
-
-    client.initialize(&admin, &usdc.address, &String::from_str(&env, "BLITZ-DUP"));
+    client.initialize(&admin, &token, &String::from_str(&env, "BLITZ-DUP-SETTLE"));
     client.deposit(&brand, &100_0000000_i128);
 
     let recipients = vec![&env, (winner.clone(), 100_0000000_i128)];
     client.settle(&recipients);
 
-    // Should panic
-    client.settle(&recipients);
+    assert_eq!(
+        client.try_settle(&recipients),
+        Err(Ok(ContractError::AlreadySettled))
+    );
+}
+
+#[test]
+fn test_settle_insufficient_balance() {
+    let (env, admin, brand, token, _, client) = setup();
+    let winner = Address::generate(&env);
+    client.initialize(&admin, &token, &String::from_str(&env, "BLITZ-OVERDRAW"));
+    client.deposit(&brand, &50_0000000_i128);
+
+    let recipients = vec![&env, (winner.clone(), 100_0000000_i128)];
+    assert_eq!(
+        client.try_settle(&recipients),
+        Err(Ok(ContractError::InsufficientBalance))
+    );
+}
+
+#[test]
+fn test_refund_happy_path() {
+    let (env, admin, brand, token, usdc, client) = setup();
+    client.initialize(&admin, &token, &String::from_str(&env, "BLITZ-REFUND"));
+    client.deposit(&brand, &200_0000000_i128);
+
+    let balance_before = usdc.balance(&brand);
+    client.refund();
+    assert!(client.is_settled());
+    assert_eq!(client.balance(), 0);
+    assert_eq!(usdc.balance(&brand), balance_before + 200_0000000_i128);
+}
+
+#[test]
+fn test_refund_non_admin_fails() {
+    let (env, admin, brand, token, _, client) = setup();
+    client.initialize(&admin, &token, &String::from_str(&env, "BLITZ-REFUND-AUTH"));
+    client.deposit(&brand, &100_0000000_i128);
+
+    env.mock_auths(&[]);
+    assert!(client.try_refund().is_err());
+}
+
+#[test]
+fn test_refund_nothing_to_refund() {
+    let (env, admin, _, token, _, client) = setup();
+    client.initialize(&admin, &token, &String::from_str(&env, "BLITZ-EMPTY"));
+
+    assert_eq!(client.try_refund(), Err(Ok(ContractError::NothingToRefund)));
+}
+
+#[test]
+fn test_deposit_after_settled_fails() {
+    let (env, admin, brand, token, _, client) = setup();
+    client.initialize(&admin, &token, &String::from_str(&env, "BLITZ-LATE"));
+    client.deposit(&brand, &100_0000000_i128);
+    client.refund();
+
+    assert_eq!(
+        client.try_deposit(&brand, &50_0000000_i128),
+        Err(Ok(ContractError::AlreadySettled))
+    );
 }

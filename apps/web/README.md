@@ -143,7 +143,7 @@ Set in `.env.local` for local development. In Docker, passed via `docker compose
 | `NEXTAUTH_URL` | Yes | Full URL of the web app (e.g. `http://localhost:3000`) |
 | `GOOGLE_CLIENT_ID` | Yes | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | Yes | Google OAuth client secret |
-| `NEXT_PUBLIC_API_URL` | Yes | API base URL visible to the browser (e.g. `http://localhost/api`) |
+| `NEXT_PUBLIC_API_URL` | Yes | API base URL visible to the browser (e.g. `http://localhost:3001/api`) |
 
 `NEXT_PUBLIC_` variables are embedded at build time — they must be available during `next build`.
 

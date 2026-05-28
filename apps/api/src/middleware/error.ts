@@ -1,7 +1,8 @@
 import type { Request, Response, NextFunction } from "express";
-import { logger } from "../lib/logger";
-import { BadRequestError } from "@stellar/stellar-sdk";
 import { ZodError } from "zod";
+import { logger } from "../lib/logger";
+import { captureExceptionSync } from "../lib/sentry";
+import { BadRequestError } from "@stellar/stellar-sdk";
 
 export interface ApiError extends Error {
   statusCode?: number;
@@ -32,6 +33,7 @@ export function errorHandler(
 
   statusCode = statusCode ?? 500;
   const isServerError = statusCode >= 500;
+
   if (isServerError) {
     message = "Internal Server Error";
   }
@@ -43,6 +45,8 @@ export function errorHandler(
       method: req.method,
       url: req.url,
     });
+    // Report to Sentry with request context; sync so it doesn't delay the response.
+    captureExceptionSync(err, { method: req.method, url: req.url });
   }
 
   const payload: Record<string, unknown> = {

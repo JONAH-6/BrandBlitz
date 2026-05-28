@@ -3,6 +3,22 @@ import { z } from "zod";
 import { BadRequestError } from "@stellar/stellar-sdk";
 import { createError, errorHandler } from "./error";
 
+// ── Module mocks ─────────────────────────────────────────────────────────────
+// vi.hoisted() creates variables that are safe to reference inside vi.mock
+// factories (they run before the factories, avoiding the TDZ problem).
+const { captureExceptionSyncMock } = vi.hoisted(() => ({
+  captureExceptionSyncMock: vi.fn(),
+}));
+
+// Prevent logger → config → process.exit chain when env vars are absent.
+vi.mock("../lib/logger", () => ({
+  logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+}));
+
+vi.mock("../lib/sentry", () => ({
+  captureExceptionSync: captureExceptionSyncMock,
+}));
+
 function makeRequest() {
   return {
     method: "POST",
@@ -118,5 +134,75 @@ describe("error middleware", () => {
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({ error: "Stellar bad request" });
+  });
+});
+
+// ── Sentry reporting ─────────────────────────────────────────────────────────
+describe("Sentry reporting in errorHandler", () => {
+  let originalEnv: string | undefined;
+
+  beforeEach(() => {
+    originalEnv = process.env.NODE_ENV;
+    captureExceptionSyncMock.mockReset();
+  });
+
+  afterEach(() => {
+    process.env.NODE_ENV = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  it("calls captureExceptionSync for 5xx errors", () => {
+    process.env.NODE_ENV = "production";
+    const req = makeRequest();
+    const res = makeResponse();
+    const error = new Error("Database exploded");
+
+    errorHandler(error, req, res, vi.fn());
+
+    expect(captureExceptionSyncMock).toHaveBeenCalledOnce();
+    expect(captureExceptionSyncMock).toHaveBeenCalledWith(
+      error,
+      { method: "POST", url: "/test" }
+    );
+  });
+
+  it("does NOT call captureExceptionSync for 4xx client errors", () => {
+    process.env.NODE_ENV = "production";
+    const req = makeRequest();
+    const res = makeResponse();
+    const error = createError("Bad input", 400, "BAD_INPUT");
+
+    errorHandler(error, req, res, vi.fn());
+
+    expect(captureExceptionSyncMock).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  it("does NOT call captureExceptionSync for ZodError (400)", () => {
+    process.env.NODE_ENV = "production";
+    const req = makeRequest();
+    const res = makeResponse();
+    const schema = z.object({ n: z.number() });
+    const result = schema.safeParse({ n: "oops" });
+    if (result.success) return;
+
+    errorHandler(result.error, req, res, vi.fn());
+
+    expect(captureExceptionSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("calls captureExceptionSync in development for 5xx errors", () => {
+    process.env.NODE_ENV = "development";
+    const req = makeRequest();
+    const res = makeResponse();
+    const error = new Error("dev crash");
+
+    errorHandler(error, req, res, vi.fn());
+
+    expect(captureExceptionSyncMock).toHaveBeenCalledOnce();
+    expect(captureExceptionSyncMock).toHaveBeenCalledWith(
+      error,
+      { method: "POST", url: "/test" }
+    );
   });
 });

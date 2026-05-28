@@ -1,5 +1,7 @@
 "use client";
 
+import { z } from "zod";
+
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { createApiClient } from "@/lib/api";
@@ -8,23 +10,25 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { UploadField } from "./upload-field";
+import { useSubmitting } from "@/hooks/use-submitting";
 
 interface BrandKitFormProps {
   apiToken: string;
 }
 
+const HEX_COLOR_PATTERN = /^#[0-9a-f]{6}$/;
+
 export function BrandKitForm({ apiToken }: BrandKitFormProps) {
   const router = useRouter();
-  const [submitting, setSubmitting] = useState(false);
+  const { submitting, wrap, setSubmitting } = useSubmitting();
   const [error, setError] = useState<string | null>(null);
 
   const [fields, setFields] = useState({
     name: "",
     tagline: "",
-    description: "",
+    brandStory: "",
     primaryColor: "#6366f1",
     secondaryColor: "#a5b4fc",
-    websiteUrl: "",
     poolAmountUsdc: "",
     durationHours: "72",
   });
@@ -32,46 +36,97 @@ export function BrandKitForm({ apiToken }: BrandKitFormProps) {
   const [logoKey, setLogoKey] = useState<string | null>(null);
   const [productImageKeys, setProductImageKeys] = useState<string[]>([]);
 
+  const hasRequiredFields = fields.name.trim() !== "" && fields.poolAmountUsdc.trim() !== "";
+  const hasValidColors =
+    HEX_COLOR_PATTERN.test(fields.primaryColor) && HEX_COLOR_PATTERN.test(fields.secondaryColor);
+  const hasValidPoolAmount =
+    fields.poolAmountUsdc.trim() !== "" && Number(fields.poolAmountUsdc) >= 10;
+  const hasValidDuration =
+    fields.durationHours.trim() !== "" &&
+    Number.isInteger(Number(fields.durationHours)) &&
+    Number(fields.durationHours) >= 1 &&
+    Number(fields.durationHours) <= 720;
+  const canSubmit =
+    !submitting &&
+    hasRequiredFields &&
+    hasValidColors &&
+    hasValidPoolAmount &&
+    hasValidDuration &&
+    Boolean(logoKey);
+
+const FormSchema = z.object({
+  name: z.string().min(1, "Brand name is required").max(100),
+  tagline: z.string().max(100).optional(),
+  brandStory: z.string().max(500).optional(),
+  primaryColor: z.string().regex(/^#[0-9a-fA-F]{6}$/, "Invalid primary color"),
+  secondaryColor: z.string().regex(/^#[0-9a-fA-F]{6}$/, "Invalid secondary color"),
+  poolAmountUsdc: z.string().refine((val) => Number(val) >= 10, "Minimum pool amount is 10 USDC"),
+  durationHours: z.string().refine((val) => {
+    const num = Number(val);
+    return Number.isInteger(num) && num >= 1 && num <= 720;
+  }, "Duration must be between 1 and 720 hours"),
+});
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!logoKey) {
-      setError("Please upload a brand logo.");
+    if (!canSubmit) {
       return;
     }
 
-    setSubmitting(true);
     setError(null);
 
+    const validationResult = FormSchema.safeParse(fields);
+    if (!validationResult.success) {
+      setError(validationResult.error.errors.map(err => err.message).join(", "));
+      return;
+    }
+
     try {
-      const api = createApiClient(apiToken);
+      await wrap(async () => {
+        const api = createApiClient(apiToken);
+        const [productImage1Key, productImage2Key] = productImageKeys;
 
-      // 1. Create brand kit
-      const brandRes = await api.post("/brands", {
-        name: fields.name,
-        tagline: fields.tagline,
-        description: fields.description,
-        primaryColor: fields.primaryColor,
-        secondaryColor: fields.secondaryColor,
-        websiteUrl: fields.websiteUrl || undefined,
-        logoKey,
-        productImageKeys,
+        // Note: The API expects S3 keys (logoKey, productImageKeys).
+        // The backend handles the conversion from these keys to public URLs after optimizing.
+        const brandRes = await api.post("/brands", {
+          name: fields.name,
+          tagline: fields.tagline,
+          brandStory: fields.brandStory,
+          primaryColor: fields.primaryColor,
+          secondaryColor: fields.secondaryColor,
+          logoKey,
+          usp: fields.tagline || undefined,
+          productImage1Key: productImageKeys[0],
+          productImage2Key: productImageKeys[1],
+        });
+
+        const brandId = brandRes.data.brand.id;
+        const parsedDurationHours = Number.parseInt(fields.durationHours, 10);
+        const durationHours = Number.isFinite(parsedDurationHours) && parsedDurationHours > 0
+          ? parsedDurationHours
+          : 72;
+        const endsAt = new Date(Date.now() + durationHours * 60 * 60 * 1000).toISOString();
+
+        // Fix path if it should be /challenges instead of /brands/challenges or vice-versa
+        // Assuming backend uses /brands/challenges based on the routes
+        const challengeRes = await api.post("/brands/challenges", {
+          brandId,
+          poolAmountUsdc: fields.poolAmountUsdc,
+          endsAt,
+        });
+
+        const { hotWalletAddress, memo, amount } = challengeRes.data.depositInstructions;
+
+        router.push(
+          `/brand/${brandId}?depositAddress=${encodeURIComponent(
+            hotWalletAddress ?? ""
+          )}&memo=${encodeURIComponent(memo ?? "")}&amount=${encodeURIComponent(
+            amount ?? ""
+          )}`
+        );
       });
-
-      const brandId = brandRes.data.brand.id;
-
-      // 2. Create challenge
-      const challengeRes = await api.post(`/brands/${brandId}/challenges`, {
-        poolAmountUsdc: fields.poolAmountUsdc,
-        durationHours: parseInt(fields.durationHours, 10),
-      });
-
-      const { depositAddress, memo } = challengeRes.data;
-
-      // Redirect to brand page to show deposit instructions
-      router.push(`/brand/${brandId}?depositAddress=${depositAddress}&memo=${memo}`);
     } catch (err: any) {
       setError(err?.response?.data?.message ?? "Failed to create brand. Please try again.");
-      setSubmitting(false);
     }
   };
 
@@ -108,11 +163,11 @@ export function BrandKitForm({ apiToken }: BrandKitFormProps) {
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="description">Brand Story</Label>
+            <Label htmlFor="brandStory">Brand Story</Label>
             <textarea
-              id="description"
-              value={fields.description}
-              onChange={set("description")}
+              id="brandStory"
+              value={fields.brandStory}
+              onChange={set("brandStory")}
               placeholder="What makes your brand unique? (used to generate quiz questions)"
               rows={4}
               className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)] resize-none"
@@ -131,12 +186,20 @@ export function BrandKitForm({ apiToken }: BrandKitFormProps) {
                   className="h-10 w-14 rounded border border-[var(--border)] cursor-pointer"
                 />
                 <Input
+                  id="primaryColorHex"
+                  aria-label="Primary Color Hex"
                   value={fields.primaryColor}
                   onChange={set("primaryColor")}
                   placeholder="#6366f1"
                   className="font-mono"
+                  pattern="^#[0-9a-f]{6}$"
+                  aria-invalid={!HEX_COLOR_PATTERN.test(fields.primaryColor)}
+                  spellCheck={false}
                 />
               </div>
+              {!HEX_COLOR_PATTERN.test(fields.primaryColor) ? (
+                <p className="text-xs text-red-500">Use format `#rrggbb` in lowercase.</p>
+              ) : null}
             </div>
             <div className="space-y-2">
               <Label htmlFor="secondaryColor">Secondary Color</Label>
@@ -149,25 +212,23 @@ export function BrandKitForm({ apiToken }: BrandKitFormProps) {
                   className="h-10 w-14 rounded border border-[var(--border)] cursor-pointer"
                 />
                 <Input
+                  id="secondaryColorHex"
+                  aria-label="Secondary Color Hex"
                   value={fields.secondaryColor}
                   onChange={set("secondaryColor")}
                   placeholder="#a5b4fc"
                   className="font-mono"
+                  pattern="^#[0-9a-f]{6}$"
+                  aria-invalid={!HEX_COLOR_PATTERN.test(fields.secondaryColor)}
+                  spellCheck={false}
                 />
               </div>
+              {!HEX_COLOR_PATTERN.test(fields.secondaryColor) ? (
+                <p className="text-xs text-red-500">Use format `#rrggbb` in lowercase.</p>
+              ) : null}
             </div>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="websiteUrl">Website URL</Label>
-            <Input
-              id="websiteUrl"
-              type="url"
-              value={fields.websiteUrl}
-              onChange={set("websiteUrl")}
-              placeholder="https://yoursite.com"
-            />
-          </div>
         </CardContent>
       </Card>
 
@@ -177,7 +238,7 @@ export function BrandKitForm({ apiToken }: BrandKitFormProps) {
           <h2 className="font-semibold text-lg">Brand Assets</h2>
 
           <div className="space-y-2">
-            <Label>Logo *</Label>
+            <Label>Logo</Label>
             <UploadField
               label="Upload Brand Logo"
               accept="image/png,image/svg+xml,image/jpeg,image/webp"
@@ -194,10 +255,17 @@ export function BrandKitForm({ apiToken }: BrandKitFormProps) {
               accept="image/*"
               uploadType="product-image"
               apiToken={apiToken}
-              onUploaded={(key) => setProductImageKeys((prev) => [...prev, key])}
+              onUploaded={(key) =>
+                setProductImageKeys((prev) => {
+                  if (prev.length >= 2) return prev;
+                  return [...prev, key];
+                })
+              }
             />
             {productImageKeys.length > 0 && (
-              <p className="text-xs text-green-600">{productImageKeys.length} image(s) uploaded</p>
+              <p className="text-xs text-green-600">
+                {productImageKeys.length}/2 image(s) uploaded
+              </p>
             )}
           </div>
         </CardContent>
@@ -245,7 +313,7 @@ export function BrandKitForm({ apiToken }: BrandKitFormProps) {
         </p>
       )}
 
-      <Button type="submit" size="lg" className="w-full" disabled={submitting}>
+      <Button type="submit" size="lg" className="w-full" disabled={!canSubmit}>
         {submitting ? "Creating..." : "Create Brand Kit & Challenge"}
       </Button>
     </form>

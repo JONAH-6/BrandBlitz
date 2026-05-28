@@ -52,6 +52,16 @@ describe("scoring service", () => {
         })
       ).toBe(0);
     });
+
+    it("returns 0 for timeout answer", () => {
+      expect(
+        calculateRoundScore({
+          selectedOption: null,
+          correctOption: "A",
+          reactionTimeMs: 15000,
+        })
+      ).toBe(0);
+    });
   });
 
   /**
@@ -70,6 +80,10 @@ describe("scoring service", () => {
 
     it("returns false for wrong answer", () => {
       expect(validateAnswer(question, "A")).toBe(false);
+    });
+
+    it("returns false for timeout answer", () => {
+      expect(validateAnswer(question, null)).toBe(false);
     });
 
     it("is case-sensitive", () => {

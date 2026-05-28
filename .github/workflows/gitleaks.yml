@@ -1,0 +1,88 @@
+name: Gitleaks
+
+on:
+  pull_request:
+  schedule:
+    - cron: "0 3 * * 0" # weekly (Sun) 03:00 UTC
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: zricethezav/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          config-path: .gitleaks.toml
+
+  nginx-config-checks:
+    name: nginx config regression checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail if ssl_prefer_server_ciphers is off
+        run: |
+          if grep -r "ssl_prefer_server_ciphers off" nginx/; then
+            echo "❌ ssl_prefer_server_ciphers must be 'on' — see docs/security/tls-test.md"
+            exit 1
+          fi
+          echo "✔ ssl_prefer_server_ciphers is not 'off'"
+
+      - name: Fail if nginx prod conf is mounted without envsubst (template)
+        run: |
+          if grep -q "nginx\.prod\.conf:/etc/nginx/conf\.d" docker-compose.prod.yml; then
+            echo "❌ nginx.prod.conf must be mounted via /etc/nginx/templates/ for envsubst — see docs/infrastructure/nginx.md"
+            exit 1
+          fi
+          echo "✔ nginx prod config uses template path"
+
+      - name: Verify DOMAIN variable is only used inside the template file
+        run: |
+          if grep -r '\${DOMAIN}' nginx/ --include="*.conf" 2>/dev/null; then
+            echo "❌ Found raw \${DOMAIN} in a .conf file — use the .conf.template instead"
+            exit 1
+          fi
+          echo "✔ \${DOMAIN} only present in template files"
+
+      - name: Boot nginx with DOMAIN substituted and verify config
+        run: |
+          docker run --rm \
+            -e DOMAIN=example.com \
+            -v "$PWD/nginx/templates:/etc/nginx/templates:ro" \
+            nginx:1.25-alpine \
+            /bin/sh -c "
+              envsubst '\$DOMAIN' \
+                < /etc/nginx/templates/nginx.prod.conf.template \
+                > /tmp/rendered.conf
+              nginx -t -c /tmp/rendered.conf 2>&1 || true
+              grep -q 'example.com' /tmp/rendered.conf || { echo '❌ DOMAIN not substituted'; exit 1; }
+              echo '✔ DOMAIN substituted correctly'
+            "
+
+  compose-env-checks:
+    name: compose environment checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail if NODE_ENV has a development default in docker-compose.yml
+        run: |
+          if grep -E "NODE_ENV:.*:-development" docker-compose.yml; then
+            echo "❌ NODE_ENV must not default to 'development' in docker-compose.yml — see docs/deployment/required-env.md"
+            exit 1
+          fi
+          echo "✔ NODE_ENV has no development default"
+
+      - name: Fail if prod compose does not set NODE_ENV=production
+        run: |
+          if ! grep -q "NODE_ENV: production" docker-compose.prod.yml; then
+            echo "❌ docker-compose.prod.yml must explicitly set NODE_ENV=production"
+            exit 1
+          fi
+          echo "✔ NODE_ENV=production is set in prod compose"

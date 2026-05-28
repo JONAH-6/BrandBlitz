@@ -15,7 +15,8 @@ export interface Brand {
   ownerId: string;
   name: string;
   tagline?: string;
-  description?: string;
+  brandStory?: string;
+  usp?: string;
   logoUrl?: string;
   primaryColor?: string;
   secondaryColor?: string;

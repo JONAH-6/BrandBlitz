@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { useSession, signOut } from "next-auth/react";
 import { createApiClient } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { StreakBadge } from "@/components/gamification/streak-badge";
+import { ThemeToggle } from "./theme-toggle";
 
 export function Header() {
   const { data: session, status } = useSession();
@@ -61,14 +62,16 @@ export function Header() {
         </nav>
 
         <div className="flex items-center gap-3">
-          {streak !== null ? <StreakBadge streak={streak} /> : null}
+          <ThemeToggle />
           {status === "loading" ? null : session ? (
             <div className="flex items-center gap-3">
               {session.user?.image ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
+                <Image
                   src={session.user.image}
                   alt={session.user.name ?? "User"}
+                  width={32}
+                  height={32}
+                  sizes="32px"
                   className="h-8 w-8 rounded-full object-cover"
                 />
               ) : (

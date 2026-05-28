@@ -1,6 +1,8 @@
 import "dotenv/config";
+import { initSentry } from "./lib/sentry";
+void initSentry();
 import { connectDb, closeDb } from "./db";
-import { connectRedis, redis } from "./lib/redis";
+import { connectRedis, redis, startRedisEvictionMonitor } from "./lib/redis";
 import { createPayoutWorker } from "./queues/processors/payout.processor";
 import { createArchiveWorker, scheduleArchiveJob } from "./queues/archive.queue";
 import { logger } from "./lib/logger";
@@ -17,6 +19,7 @@ async function startWorker(): Promise<void> {
 
   const shutdown = async (signal: string) => {
     logger.info(`${signal} received — closing worker`);
+    clearInterval(evictionMonitor);
     await payoutWorker.close();
     await archiveWorker.close();
     await closeDb();

@@ -1,41 +1,68 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import { CountdownTimer } from "./countdown-timer";
 import { WARMUP_MIN_SECONDS } from "./constants";
+import { createApiClient } from "@/lib/api";
+import { useSubmitting } from "@/hooks/use-submitting";
 import type { Challenge } from "@/lib/api";
 
 interface WarmupPhaseProps {
   challenge: Challenge;
+  apiToken: string;
   onComplete: (challengeToken: string) => void;
 }
 
-// Minimum warm-up duration is enforced server-side too, but we match it client-side
-const WARMUP_DURATION = 30; // seconds
-
-export function WarmupPhase({ challenge, onComplete }: WarmupPhaseProps) {
+export function WarmupPhase({ challenge, apiToken, onComplete }: WarmupPhaseProps) {
   const [unlocked, setUnlocked] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const { submitting, wrap } = useSubmitting();
+  // Stable reference so CountdownTimer's effect doesn't re-run when unlocked
+  // flips true and this component re-renders with a new inline arrow function.
+  const handleTimerExpire = useCallback(() => setUnlocked(true), []);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [showRetry, setShowRetry] = useState(false);
 
   // Server enforces WARMUP_MIN_SECONDS; client enables button after same duration
   useEffect(() => {
+    // Signal to server that warmup has started to initialize timing & session
+    const api = createApiClient(apiToken);
+    api.post(`/sessions/${challenge.id}/warmup-start`).catch((error) => {
+      console.error("Failed to initialize warmup session:", error);
+      setStatusMessage("Failed to initialize warmup. Please refresh.");
+    });
+
     const timer = setTimeout(() => setUnlocked(true), WARMUP_MIN_SECONDS * 1000);
     return () => clearTimeout(timer);
-  }, []);
+  }, [apiToken, challenge.id]);
 
   const handleStartChallenge = async () => {
-    setLoading(true);
+    setStatusMessage(null);
+    setShowRetry(false);
+
     try {
-      // Notify API that warmup completed — receive challenge token
-      const res = await fetch(`/api/proxy/sessions/${challenge.id}/warmup-complete`, {
-        method: "POST",
+      await wrap(async () => {
+        const api = createApiClient(apiToken);
+        const res = await api.post(`/sessions/${challenge.id}/warmup-complete`);
+        const data = res.data;
+
+        if (!data?.challengeToken) {
+          throw new Error("Missing challenge token");
+        }
+
+        onComplete(data.challengeToken);
       });
-      const data = await res.json();
-      onComplete(data.challengeToken);
-    } catch {
-      setLoading(false);
+    } catch (error: any) {
+      if (error?.response?.status === 400 && typeof error?.response?.data?.remainingMs === "number") {
+        setStatusMessage(
+          `Not yet ready. Please wait ${Math.ceil(error.response.data.remainingMs / 1000)} more seconds and try again.`
+        );
+        return;
+      }
+
+      setStatusMessage("Couldn't start the challenge. Check your connection and try again.");
+      setShowRetry(true);
     }
   };
 
@@ -65,6 +92,10 @@ export function WarmupPhase({ challenge, onComplete }: WarmupPhaseProps) {
           {challenge.brand_name}
         </h1>
 
+        {challenge.tagline ? (
+          <p className="text-center text-base font-medium text-slate-700">{challenge.tagline}</p>
+        ) : null}
+
         {/* Warmup instructions */}
         <p className="text-center text-slate-600 text-sm">
           Study this brand carefully — you&#39;ll be tested on it in a moment.
@@ -74,8 +105,8 @@ export function WarmupPhase({ challenge, onComplete }: WarmupPhaseProps) {
         {/* Countdown */}
         <div className="py-4">
           <CountdownTimer
-            durationSeconds={WARMUP_DURATION}
-            onExpire={() => setUnlocked(true)}
+            durationSeconds={WARMUP_MIN_SECONDS}
+            onExpire={handleTimerExpire}
           />
           {!unlocked && (
             <p className="text-center text-xs text-slate-500 mt-2">
@@ -87,13 +118,30 @@ export function WarmupPhase({ challenge, onComplete }: WarmupPhaseProps) {
         {/* Start button — unlocked after minimum warmup */}
         <Button
           onClick={handleStartChallenge}
-          disabled={!unlocked || loading}
+          disabled={!unlocked || submitting}
           size="lg"
           className="w-full text-lg"
           style={{ backgroundColor: challenge.primary_color ?? undefined }}
         >
-          {loading ? "Starting..." : unlocked ? "Start Challenge →" : "Preparing..."}
+          {submitting ? "Starting..." : unlocked ? "Start Challenge →" : "Preparing..."}
         </Button>
+
+        {statusMessage ? (
+          <p role="alert" className="text-center text-sm text-slate-700">
+            {statusMessage}
+          </p>
+        ) : null}
+
+        {showRetry ? (
+          <Button
+            onClick={handleStartChallenge}
+            disabled={submitting}
+            variant="outline"
+            className="w-full"
+          >
+            Retry
+          </Button>
+        ) : null}
 
         <p className="text-center text-xs text-slate-400">
           Prize pool: <strong>{challenge.pool_amount_usdc} USDC</strong>

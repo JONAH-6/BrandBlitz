@@ -4,11 +4,14 @@ import { useState, useEffect } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import Image from "next/image";
 import { createApiClient } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatUsdc } from "@/lib/utils";
+import { EmptyState } from "@/components/ui/empty-state";
+import { toast } from "@/lib/toast";
 
 interface BrandWithChallenges {
   id: string;
@@ -27,55 +30,100 @@ interface BrandWithChallenges {
 export default function DashboardPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
+  const apiToken = (session as { apiToken?: string } | null)?.apiToken;
   const [brands, setBrands] = useState<BrandWithChallenges[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [deletingBrandId, setDeletingBrandId] = useState<string | null>(null);
+
+  async function loadBrands(apiToken: string) {
+    setLoading(true);
+    setLoadError(false);
+
+    const api = createApiClient(apiToken);
+
+    try {
+      const res = await api.get("/brands");
+      setBrands(res.data.brands);
+    } catch {
+      setBrands([]);
+      setLoadError(true);
+      toast.error("Couldn't load brands. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
     if (status === "unauthenticated") {
       router.push("/login");
       return;
     }
-    if (status !== "authenticated") return;
+    if (status !== "authenticated" || !apiToken) return;
 
-    const api = createApiClient((session as any).apiToken);
-    api
-      .get("/brands")
-      .then((res) => setBrands(res.data.brands))
-      .catch(() => setBrands([]))
-      .finally(() => setLoading(false));
-  }, [session, status, router]);
+    void loadBrands(apiToken);
+  }, [apiToken, status, router]);
+
+  async function handleDeleteBrand(brand: BrandWithChallenges) {
+    if (deletingBrandId) return;
+    const ok = window.confirm(`Delete "${brand.name}"? This can’t be undone.`);
+    if (!ok) return;
+    if (!apiToken) return;
+
+    setDeletingBrandId(brand.id);
+    try {
+      const api = createApiClient(apiToken);
+      await api.delete(`/brands/${brand.id}`);
+      setBrands((prev) => prev.filter((b) => b.id !== brand.id));
+    } catch {
+      toast.error(`Couldn't delete "${brand.name}". Please try again.`);
+    } finally {
+      setDeletingBrandId(null);
+    }
+  }
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="flex min-h-screen items-center justify-center">
         <div className="animate-pulse text-[var(--muted-foreground)]">Loading dashboard...</div>
       </div>
     );
   }
 
   return (
-    <main className="max-w-5xl mx-auto px-6 py-12">
-      <div className="flex items-center justify-between mb-8">
+    <main className="mx-auto max-w-5xl px-6 py-12">
+      <div className="mb-8 flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Brand Dashboard</h1>
-          <p className="text-[var(--muted-foreground)] mt-1">Manage your brand kits and challenges</p>
+          <p className="mt-1 text-[var(--muted-foreground)]">
+            Manage your brand kits and challenges
+          </p>
         </div>
         <Link href="/brand/new">
           <Button>+ New Brand</Button>
         </Link>
       </div>
 
-      {brands.length === 0 ? (
-        <Card className="text-center py-16">
-          <CardContent>
-            <p className="text-[var(--muted-foreground)] mb-4">
-              No brands yet. Create your first brand kit to launch a challenge.
-            </p>
+      {loadError ? (
+        <EmptyState
+          title="Couldn't load brands"
+          description="We couldn't load your brands — tap to retry."
+          action={
+            <Button disabled={!apiToken} onClick={() => apiToken && void loadBrands(apiToken)}>
+              Try Again
+            </Button>
+          }
+        />
+      ) : brands.length === 0 ? (
+        <EmptyState
+          title="No brands yet"
+          description="Create your first brand kit and launch a challenge in minutes."
+          action={
             <Link href="/brand/new">
               <Button>Create Brand Kit</Button>
             </Link>
-          </CardContent>
-        </Card>
+          }
+        />
       ) : (
         <div className="space-y-6">
           {brands.map((brand) => (
@@ -84,11 +132,13 @@ export default function DashboardPage() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-4">
                     {brand.logoUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
+                      <Image
                         src={brand.logoUrl}
                         alt={brand.name}
-                        className="h-12 object-contain"
+                        width={160}
+                        height={48}
+                        sizes="160px"
+                        className="h-12 w-auto object-contain"
                       />
                     ) : (
                       <div
@@ -110,6 +160,14 @@ export default function DashboardPage() {
                     <Link href={`/brand/${brand.id}/challenge/new`}>
                       <Button size="sm">Launch Challenge</Button>
                     </Link>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      disabled={deletingBrandId === brand.id}
+                      onClick={() => handleDeleteBrand(brand)}
+                    >
+                      {deletingBrandId === brand.id ? "Deleting..." : "Delete"}
+                    </Button>
                   </div>
                 </div>
               </CardHeader>
@@ -118,16 +176,16 @@ export default function DashboardPage() {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-[var(--border)]">
-                        <th className="text-left py-2 font-medium text-[var(--muted-foreground)]">
+                        <th className="py-2 text-left font-medium text-[var(--muted-foreground)]">
                           Status
                         </th>
-                        <th className="text-right py-2 font-medium text-[var(--muted-foreground)]">
+                        <th className="py-2 text-right font-medium text-[var(--muted-foreground)]">
                           Pool
                         </th>
-                        <th className="text-right py-2 font-medium text-[var(--muted-foreground)]">
+                        <th className="py-2 text-right font-medium text-[var(--muted-foreground)]">
                           Players
                         </th>
-                        <th className="text-right py-2 font-medium text-[var(--muted-foreground)]">
+                        <th className="py-2 text-right font-medium text-[var(--muted-foreground)]">
                           Ends
                         </th>
                       </tr>

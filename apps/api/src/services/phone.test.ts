@@ -1,41 +1,51 @@
-import twilio from "twilio";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// ── Twilio mock ────────────────────────────────────────────────────────────────
+
+const mockCreateVerification = vi.fn();
+const mockCreateCheck = vi.fn();
+
+vi.mock("twilio", () => ({
+  default: vi.fn(() => ({
+    verify: {
+      v2: {
+        services: vi.fn(() => ({
+          verifications: { create: mockCreateVerification },
+          verificationChecks: { create: mockCreateCheck },
+        })),
+      },
+    },
+  })),
+}));
+
 import {
   sendVerificationCode,
   checkVerificationCode,
+  hashPhoneNumber,
   requirePhoneVerified,
 } from "./phone";
 
-jest.mock("twilio", () => {
-  return jest.fn();
-});
+// ── Tests ──────────────────────────────────────────────────────────────────────
 
-describe("Phone Service (Twilio Verification)", () => {
-  const mockCreateVerification = jest.fn();
-  const mockCreateCheck = jest.fn();
-
+describe("phone service", () => {
   beforeEach(() => {
-    jest.clearAllMocks();
-
-    // Mock Twilio client structure
-    (twilio as unknown as jest.Mock).mockImplementation(() => ({
-      verify: {
-        v2: {
-          services: () => ({
-            verifications: {
-              create: mockCreateVerification,
-            },
-            verificationChecks: {
-              create: mockCreateCheck,
-            },
-          }),
-        },
-      },
-    }));
+    vi.clearAllMocks();
+    process.env.PHONE_HASH_SALT = "unit-test-phone-salt";
   });
 
-  // -------------------------
-  // sendVerificationCode
-  // -------------------------
+  // ── hashPhoneNumber ──────────────────────────────────────────────────────────
+
+  describe("hashPhoneNumber", () => {
+    it("hashes the same phone number deterministically regardless of formatting", () => {
+      const hashA = hashPhoneNumber("+1 (555) 123-4567");
+      const hashB = hashPhoneNumber("+15551234567");
+      expect(hashA).toBe(hashB);
+      expect(hashA).toMatch(/^[0-9a-f]{64}$/);
+    });
+  });
+
+  // ── sendVerificationCode ─────────────────────────────────────────────────────
+
   describe("sendVerificationCode", () => {
     it("calls Twilio verify API with correct params", async () => {
       mockCreateVerification.mockResolvedValue({ sid: "123" });
@@ -49,27 +59,19 @@ describe("Phone Service (Twilio Verification)", () => {
     });
 
     it("surfaces Twilio errors", async () => {
-      mockCreateVerification.mockRejectedValue(
-        new Error("Twilio error")
-      );
+      mockCreateVerification.mockRejectedValue(new Error("Twilio error"));
 
-      await expect(
-        sendVerificationCode("+15551234567")
-      ).rejects.toThrow("Twilio error");
+      await expect(sendVerificationCode("+15551234567")).rejects.toThrow("Twilio error");
     });
   });
 
-  // -------------------------
-  // checkVerificationCode
-  // -------------------------
+  // ── checkVerificationCode ────────────────────────────────────────────────────
+
   describe("checkVerificationCode", () => {
     it("returns true when status is approved", async () => {
       mockCreateCheck.mockResolvedValue({ status: "approved" });
 
-      const result = await checkVerificationCode(
-        "+15551234567",
-        "123456"
-      );
+      const result = await checkVerificationCode("+15551234567", "123456");
 
       expect(result).toBe(true);
     });
@@ -77,50 +79,39 @@ describe("Phone Service (Twilio Verification)", () => {
     it("returns false when status is pending", async () => {
       mockCreateCheck.mockResolvedValue({ status: "pending" });
 
-      const result = await checkVerificationCode(
-        "+15551234567",
-        "123456"
-      );
+      const result = await checkVerificationCode("+15551234567", "123456");
 
       expect(result).toBe(false);
     });
 
-    it("returns false when status is invalid/canceled", async () => {
+    it("returns false when status is canceled", async () => {
       mockCreateCheck.mockResolvedValue({ status: "canceled" });
 
-      const result = await checkVerificationCode(
-        "+15551234567",
-        "123456"
-      );
+      const result = await checkVerificationCode("+15551234567", "123456");
 
       expect(result).toBe(false);
     });
 
     it("surfaces Twilio errors", async () => {
-      mockCreateCheck.mockRejectedValue(
-        new Error("Verification failed")
-      );
+      mockCreateCheck.mockRejectedValue(new Error("Verification failed"));
 
-      await expect(
-        checkVerificationCode("+15551234567", "123456")
-      ).rejects.toThrow("Verification failed");
+      await expect(checkVerificationCode("+15551234567", "123456")).rejects.toThrow(
+        "Verification failed"
+      );
     });
   });
 
-  // -------------------------
-  // requirePhoneVerified
-  // -------------------------
+  // ── requirePhoneVerified ─────────────────────────────────────────────────────
+
   describe("requirePhoneVerified", () => {
-    it("does nothing if phone is verified", async () => {
-      await expect(
-        requirePhoneVerified("user1", true)
-      ).resolves.toBeUndefined();
+    it("resolves when phone is verified", async () => {
+      await expect(requirePhoneVerified("user1", true)).resolves.toBeUndefined();
     });
 
-    it("throws error if phone is not verified", async () => {
-      await expect(
-        requirePhoneVerified("user1", false)
-      ).rejects.toThrow("Phone verification required");
+    it("throws when phone is not verified", async () => {
+      await expect(requirePhoneVerified("user1", false)).rejects.toThrow(
+        "Phone verification required"
+      );
     });
   });
 });

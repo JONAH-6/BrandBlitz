@@ -1,6 +1,7 @@
+import { createHash } from "crypto";
 import sharp from "sharp";
-import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
-import { s3, BUCKETS } from "./client";
+import { GetObjectCommand } from "@aws-sdk/client-s3";
+import { s3, BUCKETS, uploadObject } from "./client";
 
 type ImageType = "brand-logo" | "product-image" | "user-avatar";
 
@@ -42,6 +43,19 @@ export async function optimizeImage(key: string, type: ImageType): Promise<strin
 
   const buffer = Buffer.from(await original.Body.transformToByteArray());
 
+  // Check if format is supported and if image is valid
+  try {
+    const metadata = await sharp(buffer).metadata();
+    const supportedFormats = ["jpeg", "jpg", "png", "webp", "avif", "tiff"];
+    if (!metadata.format || !supportedFormats.includes(metadata.format)) {
+      console.warn(`[storage] Unsupported image format: ${metadata.format}. Skipping optimization for ${key}.`);
+      return key;
+    }
+  } catch (error) {
+    console.warn(`[storage] Failed to process image metadata for ${key}. Skipping optimization. Reason: ${(error as Error).message}`);
+    return key;
+  }
+
   const optimized = await sharp(buffer)
     .resize(spec.width, spec.height, {
       fit: spec.fit,
@@ -50,17 +64,19 @@ export async function optimizeImage(key: string, type: ImageType): Promise<strin
     .webp({ quality: 85 })
     .toBuffer();
 
-  const optimizedKey = key.replace(/\.[^.]+$/, ".webp");
+  // Embed an 8-hex-char content hash so the URL is stable for identical content
+  // and safe to serve with `Cache-Control: immutable`.
+  const hash = createHash("sha256").update(optimized).digest("hex").slice(0, 8);
+  const base = key.replace(/\.[^.]+$/, "");
+  const optimizedKey = `${base}-${hash}.webp`;
 
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: BUCKETS.BRAND_ASSETS,
-      Key: optimizedKey,
-      Body: optimized,
-      ContentType: "image/webp",
-      CacheControl: "public, max-age=31536000, immutable",
-    })
-  );
+  await uploadObject({
+    bucket: BUCKETS.BRAND_ASSETS,
+    key: optimizedKey,
+    body: optimized,
+    contentType: "image/webp",
+    immutable: true,
+  });
 
   return optimizedKey;
 }

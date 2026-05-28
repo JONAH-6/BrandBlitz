@@ -29,7 +29,7 @@ export default function NewBrandPage() {
       <p className="text-[var(--muted-foreground)] mb-8">
         Upload your brand assets and information to generate a challenge.
       </p>
-      <BrandKitForm apiToken={(session as any).apiToken} />
+      <BrandKitForm apiToken={session.apiToken} />
     </main>
   );
 }

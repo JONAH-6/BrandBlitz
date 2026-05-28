@@ -1,0 +1,221 @@
+import express from "express";
+import jwt from "jsonwebtoken";
+import request from "supertest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import authRouter from "./auth";
+import { createError, errorHandler } from "../middleware/error";
+import type { User } from "../db/queries/users";
+
+const mocks = vi.hoisted(() => ({
+  upsertUser: vi.fn(),
+  findUserById: vi.fn(),
+  verifyGoogleIdToken: vi.fn(),
+}));
+
+vi.mock("../db/queries/users", () => ({
+  upsertUser: mocks.upsertUser,
+  findUserById: mocks.findUserById,
+}));
+
+vi.mock("../services/google-auth", () => ({
+  verifyGoogleIdToken: mocks.verifyGoogleIdToken,
+}));
+
+vi.mock("../middleware/rate-limit", () => ({
+  authLimiter: (_req: unknown, _res: unknown, next: () => void) => next(),
+}));
+
+function createTestApp() {
+  const app = express();
+  app.use(express.json());
+  app.use("/auth", authRouter);
+  app.use(errorHandler);
+  return app;
+}
+
+function signAccessToken(user: Pick<User, "id" | "email">): string {
+  return jwt.sign({ sub: user.id, email: user.email }, process.env.JWT_SECRET!, {
+    expiresIn: "15m",
+  });
+}
+
+function signRefreshToken(user: Pick<User, "id" | "email">): string {
+  return jwt.sign(
+    { sub: user.id, email: user.email, type: "refresh", jti: "seed-refresh-token" },
+    process.env.JWT_REFRESH_SECRET!,
+    { expiresIn: "30d" }
+  );
+}
+
+const userFixture: User = {
+  id: "user-123",
+  email: "player@example.com",
+  google_id: "google-123",
+  display_name: "Player One",
+  username: "player1",
+  league: "gold",
+  total_score: 4200,
+  total_earned_usdc: "123.4500000",
+  challenges_played: 12,
+  role: "player",
+  phone_hash: "secret-phone-hash",
+  phone_verified: true,
+  age_verified: true,
+  kyc_complete: false,
+  stellar_address: null,
+  embedded_wallet_address: null,
+  avatar_url: "https://example.com/avatar.png",
+  state_code: null,
+  streak: 4,
+  last_play_day: null,
+  streak_repairs_this_month: 0,
+  streak_repair_available: false,
+  created_at: "2026-04-24T00:00:00.000Z",
+  updated_at: "2026-04-24T00:00:00.000Z",
+};
+
+describe("auth routes", () => {
+  beforeEach(() => {
+    process.env.JWT_SECRET = "test-jwt-secret-12345678901234567890";
+    process.env.JWT_REFRESH_SECRET = "test-refresh-secret-1234567890123456";
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    delete process.env.JWT_SECRET;
+    delete process.env.JWT_REFRESH_SECRET;
+  });
+
+  it("returns a JWT and refresh token for a valid Google token", async () => {
+    mocks.verifyGoogleIdToken.mockResolvedValue({
+      googleId: "google-123",
+      email: userFixture.email,
+      name: userFixture.display_name,
+      avatarUrl: userFixture.avatar_url,
+    });
+    mocks.upsertUser.mockResolvedValue(userFixture);
+
+    const response = await request(createTestApp())
+      .post("/auth/google/callback")
+      .send({ idToken: "valid-google-token" })
+      .expect(200);
+
+    expect(mocks.verifyGoogleIdToken).toHaveBeenCalledWith("valid-google-token");
+    expect(mocks.upsertUser).toHaveBeenCalledWith({
+      email: userFixture.email,
+      googleId: "google-123",
+      name: userFixture.display_name,
+      avatarUrl: userFixture.avatar_url,
+    });
+    expect(response.body.user).toEqual({
+      id: userFixture.id,
+      email: userFixture.email,
+      displayName: userFixture.display_name,
+      username: userFixture.username,
+      avatarUrl: userFixture.avatar_url,
+      role: userFixture.role,
+    });
+
+    const accessPayload = jwt.verify(response.body.token, process.env.JWT_SECRET!) as {
+      sub: string;
+      email: string;
+    };
+    const refreshPayload = jwt.verify(
+      response.body.refreshToken,
+      process.env.JWT_REFRESH_SECRET!
+    ) as { sub: string; email: string; type: string };
+
+    expect(accessPayload.sub).toBe(userFixture.id);
+    expect(accessPayload.email).toBe(userFixture.email);
+    expect(refreshPayload.sub).toBe(userFixture.id);
+    expect(refreshPayload.type).toBe("refresh");
+  });
+
+  it("returns the existing user record for an existing Google ID", async () => {
+    mocks.verifyGoogleIdToken.mockResolvedValue({
+      googleId: userFixture.google_id,
+      email: userFixture.email,
+      name: userFixture.display_name,
+      avatarUrl: userFixture.avatar_url,
+    });
+    mocks.upsertUser.mockResolvedValue(userFixture);
+
+    const response = await request(createTestApp())
+      .post("/auth/google/callback")
+      .send({ idToken: "existing-user-token" })
+      .expect(200);
+
+    expect(response.body.user.id).toBe(userFixture.id);
+    expect(mocks.upsertUser).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an invalid Google token", async () => {
+    mocks.verifyGoogleIdToken.mockRejectedValue(
+      createError("Invalid Google token", 401, "INVALID_GOOGLE_TOKEN")
+    );
+
+    const response = await request(createTestApp())
+      .post("/auth/google/callback")
+      .send({ idToken: "bad-token" })
+      .expect(401);
+
+    expect(response.body).toEqual({
+      error: "Invalid Google token",
+      code: "INVALID_GOOGLE_TOKEN",
+    });
+  });
+
+  it("returns only safe user fields from /auth/me", async () => {
+    mocks.findUserById.mockResolvedValue(userFixture);
+
+    const response = await request(createTestApp())
+      .get("/auth/me")
+      .set("Authorization", `Bearer ${signAccessToken(userFixture)}`)
+      .expect(200);
+
+    expect(mocks.findUserById).toHaveBeenCalledWith(userFixture.id);
+    expect(response.body.user).toEqual({
+      id: userFixture.id,
+      email: userFixture.email,
+      displayName: userFixture.display_name,
+      username: userFixture.username,
+      avatarUrl: userFixture.avatar_url,
+      role: userFixture.role,
+    });
+    expect(response.body.user.google_id).toBeUndefined();
+    expect(response.body.user.phone_hash).toBeUndefined();
+  });
+
+  it("rotates access and refresh tokens with a valid refresh token", async () => {
+    mocks.findUserById.mockResolvedValue(userFixture);
+    const refreshToken = signRefreshToken(userFixture);
+
+    const response = await request(createTestApp())
+      .post("/auth/refresh")
+      .send({ refreshToken })
+      .expect(200);
+
+    expect(response.body.token).not.toBe(refreshToken);
+    expect(response.body.refreshToken).not.toBe(refreshToken);
+
+    const nextAccessPayload = jwt.verify(response.body.token, process.env.JWT_SECRET!) as {
+      sub: string;
+      email: string;
+    };
+
+    expect(nextAccessPayload.sub).toBe(userFixture.id);
+    expect(nextAccessPayload.email).toBe(userFixture.email);
+  });
+
+  it("rejects an invalid refresh token", async () => {
+    const response = await request(createTestApp())
+      .post("/auth/refresh")
+      .send({ refreshToken: "not-a-valid-token" })
+      .expect(401);
+
+    expect(response.body).toEqual({
+      error: "Invalid refresh token",
+      code: "INVALID_REFRESH_TOKEN",
+    });
+  });
+});

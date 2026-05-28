@@ -7,7 +7,7 @@ type QuestionDraft = Omit<ChallengeQuestion, "id">;
  * Auto-generate 3 challenge questions from brand kit inputs.
  *
  * Round 1: Tagline recognition — show logo image, pick correct tagline
- * Round 2: USP match — show brand name, pick correct USP
+ * Round 2: Brand recognition — show brand copy, pick correct brand
  * Round 3: Product recognition — show product image, pick correct brand name
  *
  * Architecture decision: questions derived from content shown in warm-up,
@@ -34,7 +34,7 @@ export function generateChallengeQuestions(
     questions.push({
       challenge_id: challengeId,
       round: 1,
-      question_type: "tagline_recognition",
+      question_type: "which_tagline",
       prompt_type: "logo",
       question_text: `Which tagline belongs to this brand?`,
       correct_answer: brand.tagline,
@@ -49,20 +49,20 @@ export function generateChallengeQuestions(
   // — Round 2: USP match —
   if (brand.usp) {
     const distractors = pickDistractors(
-      distractorPool.map((d) => d.usp).filter(Boolean) as string[],
-      brand.usp,
+      distractorPool.map((d) => d.name).filter(Boolean) as string[],
+      brand.name,
       3
     );
-    const options = shuffle([brand.usp, ...distractors]);
-    const correctOption = optionLetter(options.indexOf(brand.usp));
+    const options = shuffle([brand.name, ...distractors]);
+    const correctOption = optionLetter(options.indexOf(brand.name));
 
     questions.push({
       challenge_id: challengeId,
       round: 2,
-      question_type: "usp_match",
-      prompt_type: "brandName",
-      question_text: `What sets ${brand.name} apart from competitors?`,
-      correct_answer: brand.usp,
+      question_type: "which_brand",
+      prompt_type: "tagline",
+      question_text: `Which brand is described by this claim: ${brand.usp}?`,
+      correct_answer: brand.name,
       option_a: options[0],
       option_b: options[1],
       option_c: options[2],
@@ -72,7 +72,7 @@ export function generateChallengeQuestions(
   }
 
   // — Round 3: Product recognition —
-  if (brand.product_image_1_url) {
+  if (brand.product_image_keys.length > 0) {
     const brandNames = pickDistractors(
       distractorPool.map((d) => d.name).filter(Boolean) as string[],
       brand.name,
@@ -84,7 +84,7 @@ export function generateChallengeQuestions(
     questions.push({
       challenge_id: challengeId,
       round: 3,
-      question_type: "product_recognition",
+      question_type: "which_product",
       prompt_type: "productImage1",
       question_text: `Which brand makes this product?`,
       correct_answer: brand.name,
@@ -108,7 +108,7 @@ export function generateChallengeQuestions(
     questions.push({
       challenge_id: challengeId,
       round,
-      question_type: "brand_name_recognition",
+      question_type: "which_brand",
       prompt_type: "logo",
       question_text: `What is the name of this brand?`,
       correct_answer: brand.name,

@@ -9,6 +9,7 @@ import {
   markChallengeStarted,
   recordRoundScore,
   finishSession,
+  storeSessionHmac,
 } from "../db/queries/sessions";
 import { calculateRoundScore, validateAnswer } from "../services/scoring";
 import { authenticate } from "../middleware/authenticate";
@@ -20,12 +21,13 @@ import {
 import { createError } from "../middleware/error";
 import { challengeStartLimiter } from "../middleware/rate-limit";
 import { redis } from "../lib/redis";
+import { computeSessionHmac } from "../lib/integrity";
 import { WARMUP_MIN_SECONDS } from "@brandblitz/stellar";
 
 const router = Router();
 
 const AnswerSchema = z.object({
-  selectedOption: z.enum(["A", "B", "C", "D"]),
+  selectedOption: z.enum(["A", "B", "C", "D"]).nullable(),
   reactionTimeMs: z.number().int().min(0),
 });
 
@@ -46,7 +48,9 @@ router.post(
     const session = await createSession({
       userId: req.user!.sub,
       challengeId: challenge.id,
-      deviceId: req.headers["x-visitor-id"] as string | undefined,
+      deviceId:
+        (req.headers["x-device-id"] as string | undefined) ??
+        (req.headers["x-visitor-id"] as string | undefined),
       isPractice: req.body.isPractice === true,
     });
 
@@ -75,8 +79,13 @@ router.post("/:challengeId/warmup-complete", authenticate, async (req, res) => {
 
   // Enforce server-side warmup minimum
   const unlockAt = await redis.get(`warmup:unlock:${session.id}`);
-  if (unlockAt && Date.now() < parseInt(unlockAt)) {
-    throw createError("Warm-up minimum not yet elapsed", 400, "WARMUP_TOO_FAST");
+  if (unlockAt) {
+    const remainingMs = parseInt(unlockAt) - Date.now();
+    if (remainingMs > 0) {
+      const error = createError("Warm-up minimum not yet elapsed", 400, "WARMUP_TOO_FAST");
+      (error as any).remainingMs = remainingMs;
+      throw error;
+    }
   }
 
   await markWarmupCompleted(session.id);
@@ -123,6 +132,7 @@ router.post(
  * POST /sessions/:challengeId/answer/:round
  * Submit an answer for a round. Validates + scores server-side.
  * Correct answers are NEVER sent to the client.
+ * Round-3 is idempotent: duplicate requests return the cached result.
  */
 router.post(
   "/:challengeId/answer/:round",
@@ -141,12 +151,14 @@ router.post(
     if (session.user_id !== req.user!.sub) throw createError("Forbidden", 403);
     if (!session.challenge_started_at) throw createError("Challenge not started", 400);
 
-    // Edge Cases
-    if (session.completed_at) throw createError("Session already completed", 409);
+    // For non-round-3, a completed session is always a hard stop
+    if (session.completed_at && round !== 3) {
+      throw createError("Session already completed", 409);
+    }
     if (session.is_flagged) throw createError("Session flagged for review", 403);
-    
+
     // Double answer check
-    const existingScores = (session as any).scores || []; // Assume scores are joined or we need to check DB
+    const existingScores = (session as any).scores || [];
     if (existingScores.some((s: any) => s.round === round)) {
       throw createError("Round already answered", 400);
     }
@@ -156,17 +168,41 @@ router.post(
     const question = questions.find((q) => q.round === round);
     if (!question) throw createError("Question not found", 404);
 
+    // Idempotent round-3 replay: return cached result if answer matches; reject if it differs
+    if (session.completed_at && round === 3) {
+      if (session.round_3_answer !== body.selectedOption) {
+        throw createError("Answer conflict detected", 409, "CONFLICT_REPLAY");
+      }
+      return res.json({
+        correct: validateAnswer(question, body.selectedOption),
+        score: session.round_3_score,
+        round: 3,
+        total_score: session.total_score,
+        rank: session.rank ?? null,
+      });
+    }
+
     const score = calculateRoundScore({
       selectedOption: body.selectedOption,
       correctOption: question.correct_option,
       reactionTimeMs: body.reactionTimeMs,
     });
 
-    await recordRoundScore(session.id, round, score);
+    await recordRoundScore(session.id, round, score, body.selectedOption, body.reactionTimeMs);
 
-    // On last round — finalize the session
+    // On last round — finalize the session and stamp an integrity HMAC
     if (round === 3) {
-      await finishSession(session.id);
+      const completed = await finishSession(session.id);
+      if (completed) {
+        const hmac = computeSessionHmac(
+          completed.id,
+          completed.total_score,
+          completed.completed_at!
+        );
+        if (hmac) {
+          await storeSessionHmac(session.id, hmac);
+        }
+      }
     }
 
     res.json({

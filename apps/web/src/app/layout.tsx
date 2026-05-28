@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+import Script from "next/script";
 import { SessionProvider } from "next-auth/react";
+import { Toaster } from "sonner";
 import "./globals.css";
 
 const inter = Inter({
@@ -22,8 +24,29 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={inter.className}>
-      <body className="min-h-screen flex flex-col antialiased bg-[var(--background)] text-[var(--foreground)]">
-        <SessionProvider>{children}</SessionProvider>
+      <head>
+        <Script id="theme-init" strategy="beforeInteractive">
+          {`
+            (function () {
+              try {
+                var key = "theme";
+                var mode = localStorage.getItem(key);
+                if (mode !== "light" && mode !== "dark" && mode !== "system") mode = "system";
+                var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+                var isDark = mode === "dark" || (mode === "system" && prefersDark);
+                var html = document.documentElement;
+                if (isDark) html.classList.add("dark"); else html.classList.remove("dark");
+                html.dataset.theme = mode;
+              } catch (e) {}
+            })();
+          `}
+        </Script>
+      </head>
+      <body className="flex min-h-screen flex-col bg-[var(--background)] text-[var(--foreground)] antialiased">
+        <SessionProvider>
+          {children}
+          <Toaster closeButton position="top-right" richColors />
+        </SessionProvider>
       </body>
     </html>
   );

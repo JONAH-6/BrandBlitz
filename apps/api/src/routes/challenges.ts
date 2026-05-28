@@ -2,11 +2,13 @@ import { Router } from "express";
 import { z } from "zod";
 import {
   getActiveChallenges,
-  getChallengeByIdAny,
+  getChallengeById,
+  getChallengesByBrandId,
   getChallengeQuestions,
 } from "../db/queries/challenges";
-import { getArchivedLeaderboard, getLeaderboard } from "../db/queries/sessions";
-import { authenticate, optionalAuth } from "../middleware/authenticate";
+import { getBrandById } from "../db/queries/brands";
+import { getLeaderboard } from "../db/queries/sessions";
+import { optionalAuth } from "../middleware/authenticate";
 import { createError } from "../middleware/error";
 
 const router = Router();
@@ -14,6 +16,7 @@ const router = Router();
 const PaginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),
+  brandId: z.string().uuid().optional(),
 });
 
 /**
@@ -21,7 +24,24 @@ const PaginationSchema = z.object({
  * List active challenges (public).
  */
 router.get("/", optionalAuth, async (req, res) => {
-  const { limit, offset } = PaginationSchema.parse(req.query);
+  const parsed = PaginationSchema.safeParse(req.query);
+  if (!parsed.success) {
+    throw createError("Invalid query parameters", 400, "INVALID_QUERY");
+  }
+
+  const { brandId, limit, offset } = parsed.data;
+
+  if (brandId) {
+    const brand = await getBrandById(brandId);
+    if (!brand || brand.owner_user_id !== req.user?.sub) {
+      throw createError("Forbidden", 403);
+    }
+
+    const challenges = await getChallengesByBrandId(brandId, limit, offset);
+    res.json({ challenges });
+    return;
+  }
+
   const challenges = await getActiveChallenges(limit, offset);
   res.json({ challenges });
 });
@@ -58,10 +78,14 @@ router.get("/:id/leaderboard", async (req, res) => {
     challengeId: challenge.id,
     sessions: sessions.map((s, i) => ({
       rank: offset + i + 1,
+      userId: s.user_id,
       username: s.username,
+      displayName: s.display_name,
+      league: s.league,
       avatarUrl: s.avatar_url,
       totalScore: s.total_score,
-      endedAt: s.challenge_ended_at,
+      totalEarned: s.total_earned_usdc,
+      endedAt: s.completed_at,
     })),
   });
 });

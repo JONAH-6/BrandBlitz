@@ -1,12 +1,16 @@
 import { submitBatchPayout, type PayoutRecipient } from "@brandblitz/stellar";
+import type { NetworkName } from "@brandblitz/stellar";
 import { getLeaderboard } from "../db/queries/sessions";
 import { getChallengeById, updateChallengeStatus } from "../db/queries/challenges";
 import { createPayout, updatePayoutStatus } from "../db/queries/payouts";
-import { calculatePayoutShare, rankWinners } from "./scoring";
-import { payoutQueue } from "../queues/payout.queue";
+import { rankWinners } from "./scoring";
+import { calculatePayoutShareStroops, stroopsToUsdc } from "../lib/usdc";
+import { payoutJobOptions, payoutQueue } from "../queues/payout.queue";
 import { logger } from "../lib/logger";
+import { metrics } from "../lib/metrics";
 import { config } from "../lib/config";
-import type { NetworkName } from "@brandblitz/stellar";
+import { stellarSequenceStore } from "../lib/redis";
+import { verifySessionHmac } from "../lib/integrity";
 
 /**
  * Enqueue a payout job for a completed challenge.
@@ -16,12 +20,7 @@ export async function enqueuePayout(challengeId: string): Promise<void> {
   await payoutQueue.add(
     "process-payout",
     { challengeId },
-    {
-      attempts: 3,
-      backoff: { type: "exponential", delay: 5000 },
-      removeOnComplete: { count: 100 },
-      removeOnFail: { count: 50 },
-    }
+    payoutJobOptions
   );
   logger.info("Payout job enqueued", { challengeId });
 }
@@ -34,11 +33,30 @@ export async function processPayout(challengeId: string): Promise<void> {
   const challenge = await getChallengeById(challengeId);
   if (!challenge) throw new Error(`Challenge ${challengeId} not found`);
   if (challenge.status !== "ended") {
-    logger.warn("Payout skipped — challenge not in ended state", { challengeId });
+    logger.warn("Payout skipped - challenge not in ended state", { challengeId });
     return;
   }
 
   const sessions = await getLeaderboard(challengeId, 1000); // all ranked sessions
+
+  // Verify session integrity before any payout; abort if any record was tampered with
+  for (const session of sessions) {
+    if (!verifySessionHmac(
+      session.id,
+      session.total_score,
+      session.completed_at ?? "",
+      session.integrity_hmac
+    )) {
+      metrics.inc("antiCheat.integrity_hmac_tampered_total");
+      logger.error("Session integrity check failed — payout aborted", {
+        challengeId,
+        sessionId: session.id,
+        userId: session.user_id,
+      });
+      throw new Error(`Session ${session.id} failed integrity check`);
+    }
+  }
+
   if (sessions.length === 0) {
     await updateChallengeStatus(challengeId, "settled");
     return;
@@ -47,34 +65,57 @@ export async function processPayout(challengeId: string): Promise<void> {
   const ranked = rankWinners(
     sessions.map((s) => ({
       userId: s.user_id,
-      stellarAddress: (s as any).stellar_address ?? "",
+      stellarAddress: (s.stellar_address ?? "").trim(),
       totalScore: s.total_score,
-      endedAt: s.challenge_ended_at ?? s.created_at,
+      endedAt: s.completed_at ?? s.created_at,
     }))
-  ).filter((s) => s.stellarAddress);
+  );
 
-  const totalPoints = ranked.reduce((acc, s) => acc + s.totalScore, 0);
+  const eligibleWinners = ranked.filter((winner) => {
+    if (winner.stellarAddress) return true;
 
+    logger.error("Winner missing Stellar address on file; skipping payout", {
+      challengeId,
+      userId: winner.userId,
+    });
+
+    return false;
+  });
+
+  const totalPoints = eligibleWinners.reduce((acc, s) => acc + s.totalScore, 0);
   const recipients: PayoutRecipient[] = [];
-  const payoutRecords: { id: string; address: string; amount: string }[] = [];
+  const payoutRecords: { id: string; address: string }[] = [];
 
-  for (const winner of ranked) {
-    const amount = calculatePayoutShare(
+  for (const winner of eligibleWinners) {
+    const amountStroops = calculatePayoutShareStroops(
       winner.totalScore,
       totalPoints,
-      challenge.pool_amount_usdc
+      challenge.pool_amount_stroops
     );
-    if (parseFloat(amount) < 0.0000001) continue;
 
+    if (amountStroops < 1n) {
+      continue;
+    }
+
+    const amount = stroopsToUsdc(amountStroops);
     const payout = await createPayout({
       challengeId,
       userId: winner.userId,
       stellarAddress: winner.stellarAddress,
-      amountUsdc: amount,
+      amountStroops,
     });
 
     recipients.push({ address: winner.stellarAddress, amount });
-    payoutRecords.push({ id: payout.id, address: winner.stellarAddress, amount });
+    payoutRecords.push({ id: payout.id, address: winner.stellarAddress });
+  }
+
+  if (recipients.length === 0) {
+    logger.error("No payout recipients available after ranking", {
+      challengeId,
+      rankedCount: ranked.length,
+    });
+    await updateChallengeStatus(challengeId, "settled");
+    return;
   }
 
   const network = config.STELLAR_NETWORK as NetworkName;
@@ -82,21 +123,45 @@ export async function processPayout(challengeId: string): Promise<void> {
     recipients,
     config.HOT_WALLET_SECRET,
     challengeId,
-    network
+    network,
+    { sequenceStore: stellarSequenceStore }
   );
 
   const txHashes: string[] = [];
+  let hasFailure = false;
+
   for (const result of results) {
     const status = result.success ? "sent" : "failed";
+    if (!result.success) {
+      hasFailure = true;
+    }
+
+    const errorMessage = !result.success
+      ? (result.error ?? "Stellar broadcast failed with no error detail")
+      : undefined;
+
     for (const recipient of result.recipients) {
-      const record = payoutRecords.find((r) => r.address === recipient.address);
+      const record = payoutRecords.find((candidate) => candidate.address === recipient.address);
       if (record) {
-        await updatePayoutStatus(record.id, status, result.txHash || undefined);
+        await updatePayoutStatus(record.id, status, result.txHash || undefined, errorMessage);
       }
     }
-    if (result.success) txHashes.push(result.txHash);
+
+    if (result.success) {
+      txHashes.push(result.txHash);
+    }
   }
 
-  await updateChallengeStatus(challengeId, "settled", { payoutTxHashes: txHashes });
+  await updateChallengeStatus(
+    challengeId,
+    hasFailure ? "payout_failed" : "settled",
+    txHashes.length > 0 ? { payoutTxHashes: txHashes } : undefined
+  );
+
+  if (hasFailure) {
+    logger.warn("Payout completed with failures", { challengeId, txHashes });
+    return;
+  }
+
   logger.info("Payout complete", { challengeId, txHashes });
 }

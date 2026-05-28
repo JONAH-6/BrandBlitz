@@ -16,10 +16,7 @@ import { getHorizonServer, getUsdcAsset, getNetworkPassphrase, type NetworkName 
  * saves 2 XLM (~$0.20) per user in minimum reserve costs.
  */
 export function createMuxedAddress(basePublicKey: string, userId: bigint): string {
-  const muxed = new MuxedAccount(
-    { id: "0", accountId: basePublicKey } as any,
-    userId.toString()
-  );
+  const muxed = new MuxedAccount(basePublicKey, userId.toString());
   return muxed.accountId();
 }
 

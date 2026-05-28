@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Markdown lint ────────────────────────────────────────────────────────────
+  docs-lint:
+    name: Markdown lint (docs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install markdownlint-cli
+        run: npm install -g markdownlint-cli
+
+      - name: Lint all Markdown files
+        run: |
+          markdownlint '**/*.md' \
+            --ignore node_modules \
+            --ignore '.corepack/**' \
+            --config .markdownlint.json \
+            || true   # report findings but don't fail until rule-set is stable
+          markdownlint 'docs/runbooks/*.md' --ignore node_modules
+        # The second call enforces runbooks strictly because they are the
+        # critical operational documents (rotate-secrets.md, cdn-purge.md, …)
+
+  # ── Unit tests ───────────────────────────────────────────────────────────────
+  test-api:
+    name: API unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @brandblitz/api test
+
+  test-web:
+    name: Web unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @brandblitz/web test
+
+  test-storage:
+    name: Storage package tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @brandblitz/storage test
+
+  # ── Build + source-map upload (Sentry) ──────────────────────────────────────
+  build:
+    name: Build & upload source maps
+    runs-on: ubuntu-latest
+    needs: [test-api, test-web, test-storage]
+    # Only upload maps on pushes to main (not PRs — avoids noise & token exposure)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+      SENTRY_PROJECT_API: ${{ secrets.SENTRY_PROJECT_API }}
+      SENTRY_PROJECT_WEB: ${{ secrets.SENTRY_PROJECT_WEB }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build API (generates dist/ with source maps)
+        working-directory: apps/api
+        run: pnpm build
+
+      - name: Build Web (Next.js — generates .next/ with source maps)
+        working-directory: apps/web
+        run: pnpm build
+        env:
+          NEXT_PUBLIC_SENTRY_DSN: ${{ secrets.NEXT_PUBLIC_SENTRY_DSN }}
+
+      - name: Upload API source maps to Sentry
+        if: env.SENTRY_AUTH_TOKEN != ''
+        run: |
+          npx @sentry/cli releases new "${{ github.sha }}"
+          npx @sentry/cli releases files "${{ github.sha }}" upload-sourcemaps \
+            apps/api/dist \
+            --org "$SENTRY_ORG" \
+            --project "$SENTRY_PROJECT_API" \
+            --rewrite
+          npx @sentry/cli releases finalize "${{ github.sha }}"
+
+      - name: Upload Web source maps to Sentry
+        if: env.SENTRY_AUTH_TOKEN != ''
+        run: |
+          npx @sentry/cli releases files "${{ github.sha }}" upload-sourcemaps \
+            apps/web/.next \
+            --org "$SENTRY_ORG" \
+            --project "$SENTRY_PROJECT_WEB" \
+            --rewrite

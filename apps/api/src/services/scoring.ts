@@ -1,4 +1,5 @@
 import type { ChallengeQuestion } from "../db/queries/challenges";
+import { calculatePayoutShareStroops, stroopsToUsdc, usdcToStroops } from "../lib/usdc";
 
 const BASE_POINTS = 100;
 const MAX_SPEED_BONUS = 50;
@@ -13,7 +14,7 @@ const ROUND_DURATION_MS = 15_000;
  * Max per round: 150. Max total: 450.
  */
 export function calculateRoundScore(params: {
-  selectedOption: "A" | "B" | "C" | "D";
+  selectedOption: "A" | "B" | "C" | "D" | null;
   correctOption: "A" | "B" | "C" | "D";
   reactionTimeMs: number;
 }): number {
@@ -33,7 +34,7 @@ export function calculateRoundScore(params: {
  */
 export function validateAnswer(
   question: ChallengeQuestion,
-  selectedOption: "A" | "B" | "C" | "D"
+  selectedOption: "A" | "B" | "C" | "D" | null
 ): boolean {
   return question.correct_option === selectedOption;
 }
@@ -47,15 +48,17 @@ export function calculatePayoutShare(
   totalPointsAllUsers: number,
   poolAmountUsdc: string
 ): string {
-  if (totalPointsAllUsers === 0) return "0.0000000";
-  const pool = parseFloat(poolAmountUsdc);
-  const share = (userScore / totalPointsAllUsers) * pool;
-  return share.toFixed(7);
+  const stroops = calculatePayoutShareStroops(
+    userScore,
+    totalPointsAllUsers,
+    usdcToStroops(poolAmountUsdc)
+  );
+  return stroopsToUsdc(stroops);
 }
 
 /**
  * Get top-N winners from sessions eligible for payout.
- * Sorted by total_score DESC, then challenge_ended_at ASC (tiebreaker: fastest finish).
+ * Sorted by total_score DESC, then completed_at ASC (tiebreaker: fastest finish).
  */
 export interface SessionSummary {
   userId: string;

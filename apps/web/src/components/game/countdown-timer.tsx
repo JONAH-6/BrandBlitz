@@ -14,9 +14,10 @@ export function CountdownTimer({ durationSeconds, onExpire, className }: Countdo
   const [timeLeftMs, setTimeLeftMs] = useState(durationSeconds * 1000);
 
   useEffect(() => {
-    const startTime = Date.now();
     const totalMs = durationSeconds * 1000;
-
+    setTimeLeftMs(totalMs);
+    const startTime = Date.now();
+    
     const interval = setInterval(() => {
       const elapsed = Date.now() - startTime;
       const remaining = Math.max(0, totalMs - elapsed);
