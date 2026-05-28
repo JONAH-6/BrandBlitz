@@ -161,3 +161,22 @@ export async function getLeaderboard(
   );
   return result.rows;
 }
+
+export async function getArchivedLeaderboard(
+  challengeId: string,
+  limit = 20,
+  offset = 0
+): Promise<Array<GameSession & { username: string; avatar_url: string }>> {
+  const result = await query<GameSession & { username: string; avatar_url: string }>(
+    `SELECT gs.*, u.email as username, u.avatar_url
+     FROM game_sessions_archive gs
+     JOIN users u ON gs.user_id = u.id
+     WHERE gs.challenge_id = $1
+       AND gs.flagged = FALSE
+       AND gs.is_practice = FALSE
+     ORDER BY gs.total_score DESC, gs.challenge_ended_at ASC
+     LIMIT $2 OFFSET $3`,
+    [challengeId, limit, offset]
+  );
+  return result.rows;
+}

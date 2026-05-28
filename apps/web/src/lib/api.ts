@@ -59,6 +59,7 @@ export interface UserProfile {
   totalEarned: string;
   totalChallenges: number;
   avatarUrl: string | null;
+  streak?: number;
   bestScore?: number;
   recentSessions?: Array<{
     id: string;
@@ -67,4 +68,11 @@ export interface UserProfile {
     rank?: number;
     completedAt: string;
   }>;
+}
+
+export interface StreakResponse {
+  streak: number;
+  nextMilestone: number;
+  progress: number;
+  milestoneJustHit: boolean;
 }

@@ -2,6 +2,7 @@ import "dotenv/config";
 import { connectDb, closeDb } from "./db";
 import { connectRedis, redis } from "./lib/redis";
 import { createPayoutWorker } from "./queues/processors/payout.processor";
+import { createArchiveWorker, scheduleArchiveJob } from "./queues/archive.queue";
 import { logger } from "./lib/logger";
 
 async function startWorker(): Promise<void> {
@@ -9,11 +10,15 @@ async function startWorker(): Promise<void> {
   await connectRedis();
 
   const payoutWorker = createPayoutWorker();
-  logger.info("BullMQ worker started — processing payout jobs");
+  const archiveWorker = createArchiveWorker();
+  await scheduleArchiveJob();
+
+  logger.info("BullMQ worker started — processing payout and archive jobs");
 
   const shutdown = async (signal: string) => {
     logger.info(`${signal} received — closing worker`);
     await payoutWorker.close();
+    await archiveWorker.close();
     await closeDb();
     await redis.disconnect();
     logger.info("Worker shutdown complete");

@@ -46,6 +46,26 @@ router.get("/me", authenticate, async (req, res) => {
   res.json({ user: safeUser });
 });
 
+router.get("/me/streak", authenticate, async (req, res) => {
+  const user = await findUserById(req.user!.sub);
+  if (!user) throw createError("User not found", 404);
+
+  const milestones = [3, 7, 14, 30];
+  const nextMilestone = milestones.find((m) => m > user.streak) ?? milestones[milestones.length - 1];
+  const progress = Math.min(1, user.streak / Math.max(1, nextMilestone));
+
+  const lastPlayDay = user.last_play_day ? new Date(user.last_play_day).toISOString().slice(0, 10) : null;
+  const today = new Date().toISOString().slice(0, 10);
+  const milestoneJustHit = milestones.includes(user.streak) && lastPlayDay === today;
+
+  res.json({
+    streak: user.streak,
+    nextMilestone,
+    progress,
+    milestoneJustHit,
+  });
+});
+
 /**
  * GET /users/profile/:username
  * Public profile — display name, stats. No auth required.
@@ -64,6 +84,7 @@ router.get("/profile/:username", apiLimiter, async (req, res) => {
       totalEarned: user.total_earned_usdc,
       totalChallenges: user.challenges_played,
       avatarUrl: user.avatar_url,
+      streak: user.streak,
     },
   });
 });
