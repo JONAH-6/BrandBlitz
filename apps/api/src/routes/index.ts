@@ -7,6 +7,7 @@ import uploadRoutes from "./upload";
 import usersRoutes from "./users";
 import leaderboardRoutes from "./leaderboard";
 import webhooksRoutes from "./webhooks";
+import adminRoutes from "./admin";
 
 export function registerRoutes(app: Express): void {
   app.use("/auth", authRoutes);
@@ -17,4 +18,5 @@ export function registerRoutes(app: Express): void {
   app.use("/users", usersRoutes);
   app.use("/leaderboard", leaderboardRoutes);
   app.use("/webhooks", webhooksRoutes);
+  app.use("/admin", adminRoutes);
 }

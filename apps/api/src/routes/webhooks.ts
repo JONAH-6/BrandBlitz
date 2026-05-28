@@ -4,8 +4,7 @@ import {
   updateChallengeStatus,
 } from "../db/queries/challenges";
 import { logger } from "../lib/logger";
-import { config } from "../lib/config";
-
+import { verifyWebhook } from "../middleware/verify-webhook";
 import { webhookLimiter } from "../middleware/rate-limit";
 
 const router = Router();
@@ -18,13 +17,7 @@ const router = Router();
  * This endpoint is internal only — not exposed to the public internet.
  * Protected by a shared secret in the X-Webhook-Secret header.
  */
-router.post("/stellar/deposit", webhookLimiter, async (req, res) => {
-  const secret = req.headers["x-webhook-secret"];
-  if (secret !== config.WEBHOOK_SECRET) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-
+router.post("/stellar/deposit", webhookLimiter, verifyWebhook, async (req, res) => {
   const { memo, txHash, amount } = req.body as {
     memo: string;
     txHash: string;
