@@ -6,6 +6,7 @@ import { connectRedis, redis, startRedisEvictionMonitor } from "./lib/redis";
 import { createPayoutWorker } from "./queues/processors/payout.processor";
 import { createLeagueWorker } from "./queues/processors/league.processor";
 import { ensureLeagueRepeatableJobs } from "./queues/league.queue";
+import { drainSharedAgent } from "@brandblitz/stellar";
 import { logger } from "./lib/logger";
 
 async function startWorker(): Promise<void> {
@@ -25,6 +26,7 @@ async function startWorker(): Promise<void> {
     await leagueWorker.close();
     await closeDb();
     await redis.disconnect();
+    drainSharedAgent();
     logger.info("Worker shutdown complete");
     process.exit(0);
   };

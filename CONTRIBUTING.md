@@ -13,6 +13,7 @@ Thank you for contributing to BrandBlitz — the skill-validated attention marke
 - [Code Review Expectations](#code-review-expectations)
 - [Drips Wave 4 Rules](#drips-wave-4-rules)
 - [Issue Templates](#issue-templates)
+- [Operations Runbooks](#operations-runbooks)
 - [Getting Started](#getting-started)
 
 ---
@@ -216,6 +217,15 @@ Use the appropriate issue template when opening a new issue (see issue [#60](../
 | **Chore / maintenance** | Dependency upgrades, tooling changes, CI fixes |
 
 If no template fits, open a blank issue with at minimum: context, expected behaviour, and actual behaviour.
+
+---
+
+## Operations Runbooks
+
+When you introduce a new failure mode (new queue, new external dependency, new background job), add a runbook in [`docs/runbooks/`](./docs/runbooks/README.md) following the template in the index.
+
+Runbooks cover: symptom → impact → diagnosis → mitigation → remediation.
+Link your new runbook from the `docs/runbooks/README.md` index.
 
 ---
 

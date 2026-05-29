@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 import Script from "next/script";
 import { SessionProvider } from "next-auth/react";
 import { Toaster } from "sonner";
+import { AuthBoundary } from "@/components/auth/auth-boundary";
 import "./globals.css";
 
 const inter = Inter({
@@ -43,10 +44,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         </Script>
       </head>
       <body className="flex min-h-screen flex-col bg-[var(--background)] text-[var(--foreground)] antialiased">
-        <SessionProvider>
-          {children}
-          <Toaster closeButton position="top-right" richColors />
-        </SessionProvider>
+        <AuthBoundary>
+          <SessionProvider>
+            {children}
+            <Toaster closeButton position="top-right" richColors />
+          </SessionProvider>
+        </AuthBoundary>
       </body>
     </html>
   );

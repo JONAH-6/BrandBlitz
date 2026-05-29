@@ -28,6 +28,23 @@ function isAcceptedMime(mimeType: string, accept: string): boolean {
     });
 }
 
+/** Retry POST /upload/verify up to 3 times with 200 / 500 / 1000 ms backoff. */
+async function verifyWithRetry(
+  api: ReturnType<typeof createApiClient>,
+  key: string
+): Promise<void> {
+  const delays = [200, 500, 1000];
+  for (let i = 0; i < delays.length; i++) {
+    try {
+      await api.post("/upload/verify", { key });
+      return;
+    } catch (err) {
+      if (i === delays.length - 1) throw err;
+      await new Promise<void>((r) => setTimeout(r, delays[i]));
+    }
+  }
+}
+
 export function UploadField({
   label,
   accept = "image/*",
@@ -64,6 +81,8 @@ export function UploadField({
     setUploading(true);
     setPendingFile(file);
 
+    let presignedKey: string | null = null;
+
     try {
       const api = createApiClient(apiToken);
 
@@ -87,14 +106,35 @@ export function UploadField({
         throw new Error(`PUT failed with status ${putRes.status}`);
       }
 
-      // 3. Verify upload
-      await api.post("/upload/verify", { key });
+      // Track the key so we can abort if verify fails
+      presignedKey = key;
 
+      // 3. Verify upload — retries 3× (200 / 500 / 1000 ms backoff)
+      try {
+        await verifyWithRetry(api, key);
+      } catch {
+        // File made it to S3 but verify never confirmed — delete the orphan
+        await api
+          .delete("/upload/abort", { data: { key } })
+          .catch(() => {});
+        throw new Error("verify-failed");
+      }
+
+      presignedKey = null;
       setPendingFile(null);
       setUploadedUrl(publicUrl);
       onUploaded(key, publicUrl);
-    } catch {
-      setError("Upload failed. Please try again.");
+    } catch (err: unknown) {
+      const isVerifyFail =
+        err instanceof Error && err.message === "verify-failed";
+      setError(
+        isVerifyFail
+          ? "Upload could not be confirmed. The file has been removed. Please try again."
+          : "Upload failed. Please try again."
+      );
+      // presignedKey being non-null here means PUT succeeded but we aborted above —
+      // nothing more to clean up at this point.
+      void presignedKey;
     } finally {
       setUploading(false);
     }

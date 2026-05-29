@@ -32,6 +32,7 @@
 - [Workspace Scripts](#workspace-scripts)
 - [Packages](#packages)
 - [Further Reading](#further-reading)
+- [Operations Runbooks](#operations-runbooks)
 
 ---
 
@@ -609,3 +610,20 @@ S3-compatible object storage with image optimisation. Imported by `apps/api`. Wo
 - [`apps/api/README.md`](./apps/api/README.md) — Full API reference, all routes, middleware, services, database schema
 - [`apps/web/README.md`](./apps/web/README.md) — Frontend pages, components, auth flow, game state machine, upload flow
 - [`contracts/README.md`](./contracts/README.md) — Soroban escrow contract: build, test, deploy, full function reference
+
+---
+
+## Operations Runbooks
+
+Incident-response playbooks for on-call engineers live in [`docs/runbooks/`](./docs/runbooks/README.md).
+
+| Runbook | Summary |
+|---|---|
+| [horizon-outage](./docs/runbooks/horizon-outage.md) | Stellar Horizon degraded — payout queue paused |
+| [hot-wallet-low-balance](./docs/runbooks/hot-wallet-low-balance.md) | USDC balance too low to process payouts |
+| [payout-stuck-in-queue](./docs/runbooks/payout-stuck-in-queue.md) | BullMQ payout jobs not progressing |
+| [leaked-secret](./docs/runbooks/leaked-secret.md) | Secret exposed in git or logs |
+| [cdn-purge](./docs/runbooks/cdn-purge.md) | Force-invalidate a cached asset |
+| [rotate-secrets](./docs/runbooks/rotate-secrets.md) | General secret rotation |
+
+See [docs/runbooks/README.md](./docs/runbooks/README.md) for the full index.
